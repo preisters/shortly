@@ -40,6 +40,18 @@ pip install -r requirements.txt
 `SHORTLY_LOG_DIR`, `SHORTLY_TTS_OUTPUT_DIR`로 명시적으로 재정의할 수 있습니다.
 기존 데이터는 제품 프로파일 사이에서 자동 이동하거나 자동 탐색하지 않습니다.
 
+제품별 실행 엔트리포인트:
+
+```bash
+# 기존 호환 실행(legacy)
+python -m shortly web
+
+# 개인 자동화판 로컬 웹 앱
+python -m shortly.apps.personal.launcher
+
+# 팀판은 portable 패키지의 기존 시작 파일이 team composition root를 사용
+```
+
 ### 로컬 모델 사용 (Ollama / LM Studio)
 
 `provider=local` 로 OpenAI 호환 로컬 서버에 붙습니다. `pip install openai` 가 필요합니다.

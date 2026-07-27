@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+import os
+import threading
+import time
+import unittest
+from unittest.mock import patch
+
+from support import isolated_shortly_env
+
+try:
+    from fastapi.testclient import TestClient
+    from shortly.apps.personal.api import create_app as create_personal_app
+    from shortly.apps.team.api import create_app as create_team_app
+    from shortly.config import Settings
+    import shortly.web.app as legacy_app
+    from shortly.product_profile import ProductKind
+    from shortly.web.composition import composition_scope
+    from shortly.web.factory import route_manifest
+except ModuleNotFoundError:
+    create_personal_app = None
+    create_team_app = None
+
+
+class _FakeService:
+    def __init__(self) -> None:
+        self.guide_called = threading.Event()
+
+    def list_channels(self, settings=None):
+        return [{"input": "@injected", "learned": True, "count": 1, "slug": "injected"}]
+
+    def generate_guide(
+        self,
+        channel,
+        text,
+        is_script=False,
+        settings=None,
+        progress=None,
+    ):
+        self.guide_called.set()
+        return {"ok": True, "channel": channel, "text": text}
+
+
+@unittest.skipIf(
+    create_team_app is None,
+    "FastAPI runtime dependencies are unavailable",
+)
+class AppCompositionTests(unittest.TestCase):
+    def test_product_factories_return_distinct_apps_with_same_routes(self) -> None:
+        with isolated_shortly_env():
+            team = create_team_app()
+            personal = create_personal_app()
+
+        self.assertIsNot(team, personal)
+        self.assertIsNot(team, legacy_app.app)
+        self.assertEqual(team.state.product, ProductKind.TEAM.value)
+        self.assertEqual(personal.state.product, ProductKind.PERSONAL.value)
+        self.assertFalse(team.state.features.local_llm)
+        self.assertTrue(personal.state.features.local_llm)
+        self.assertEqual(route_manifest(team), route_manifest(legacy_app.app))
+        self.assertEqual(route_manifest(personal), route_manifest(legacy_app.app))
+        self.assertEqual(len(team.routes), 24)
+        self.assertEqual(len(personal.routes), 24)
+
+    def test_request_scope_selects_injected_service(self) -> None:
+        fake = _FakeService()
+        with isolated_shortly_env():
+            app = create_team_app(service_api=fake)
+            composition = app.state.shortly_composition
+            with composition_scope(composition):
+                channels = legacy_app.api_channels()
+
+        self.assertEqual(channels[0]["input"], "@injected")
+
+    def test_http_middleware_binds_injected_service(self) -> None:
+        fake = _FakeService()
+        with isolated_shortly_env():
+            app = create_team_app(service_api=fake)
+            with patch.object(
+                legacy_app,
+                "get_settings",
+                return_value=Settings(lan_only=False),
+            ):
+                with TestClient(app) as client:
+                    response = client.get("/api/channels")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]["input"], "@injected")
+
+    def test_background_job_captures_injected_service_before_thread_start(self) -> None:
+        fake = _FakeService()
+        with isolated_shortly_env():
+            app = create_personal_app(service_api=fake)
+            composition = app.state.shortly_composition
+            with composition_scope(composition):
+                response = legacy_app.api_guide(
+                    legacy_app.GuideRequest(
+                        channel="@fixture",
+                        text="fixture topic",
+                    )
+                )
+
+        self.assertTrue(fake.guide_called.wait(timeout=2.0))
+        job_id = response["job_id"]
+        deadline = time.time() + 2.0
+        while legacy_app.JOBS[job_id].status == "running" and time.time() < deadline:
+            time.sleep(0.01)
+        try:
+            self.assertEqual(legacy_app.JOBS[job_id].status, "done")
+            self.assertEqual(
+                legacy_app.JOBS[job_id].result,
+                {
+                    "ok": True,
+                    "channel": "@fixture",
+                    "text": "fixture topic",
+                },
+            )
+        finally:
+            legacy_app.JOBS.pop(job_id, None)
+
+    def test_product_kind_is_not_left_changed_after_test_scope(self) -> None:
+        old_product = os.environ.get("SHORTLY_PRODUCT")
+        with isolated_shortly_env():
+            create_team_app()
+            self.assertEqual(os.environ["SHORTLY_PRODUCT"], "team")
+        self.assertEqual(os.environ.get("SHORTLY_PRODUCT"), old_product)
+
+
+if __name__ == "__main__":
+    unittest.main()

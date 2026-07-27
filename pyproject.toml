@@ -1,0 +1,15 @@
+[project]
+name = "shortly"
+version = "0.1.0"
+description = "특정 유튜브 채널의 쇼츠 스타일을 학습해 같은 느낌의 제작 가이드를 생성하는 툴"
+requires-python = ">=3.10"
+
+[project.scripts]
+shortly = "shortly.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["shortly*"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

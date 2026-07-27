@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>shortly · 쇼츠 스타일 분석·제작 가이드</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>shortly</h1>
+    <p class="tagline">유튜브 채널 쇼츠를 학습해 같은 느낌의 제작 가이드를 만들어 드립니다.</p>
+    <div id="status-bar" class="status-bar"></div>
+  </header>
+
+  <main>
+    <section class="card" id="section-settings">
+      <h2>설정 · AI 연결</h2>
+      <p class="hint" id="settings-hint-full">분석과 대본 생성에 쓸 AI를 고르고 토큰(API 키)을 넣으세요. 비워두면 간단한 자동 규칙으로만 동작합니다. 키는 이 컴퓨터의 .env 파일에만 저장됩니다.</p>
+      <p class="hint" id="settings-hint-portable" style="display:none">팀용 포터블 버전입니다. <b>학습 AI = Claude Sonnet 5</b>, <b>대본 생성 AI = Claude Opus 4.8</b> 로 고정되어 있습니다. Claude API 키와 CapCut 내보내기용 <b>Typecast TTS API 키</b>를 입력하세요. 키는 이 PC의 사용자 폴더에만 저장됩니다.</p>
+      <div id="ai-settings-portable" style="display:none">
+        <div class="row">
+          <span class="hint">학습: <b id="portable-learn-model">claude-sonnet-5</b></span>
+          <span class="hint">생성: <b id="portable-gen-model">claude-opus-4-8</b></span>
+        </div>
+        <div class="row">
+          <label class="grow">Claude API 키
+            <input id="set-key-portable" type="password" class="grow" placeholder="Anthropic API 키 입력" />
+          </label>
+        </div>
+        <div class="row">
+          <label class="grow">Typecast TTS API 키
+            <input id="set-tts-key-portable" type="password" class="grow" placeholder="CapCut 내보내기 시 나레이션 음성 생성" />
+          </label>
+        </div>
+        <p class="hint">TTS 키: <a href="https://typecast.ai/developers/api/api-key" target="_blank" rel="noopener">typecast.ai</a> 에서 발급. 키가 있으면 CapCut 내보내기 때 대본 음성이 자동 생성됩니다.</p>
+      </div>
+      <div id="ai-settings-advanced">
+      <div class="row">
+        <label>AI 종류
+          <select id="set-provider">
+            <option value="gemini">Google Gemini</option>
+            <option value="openai">OpenAI (ChatGPT)</option>
+            <option value="anthropic">Anthropic Claude</option>
+            <option value="local">로컬 (Ollama / LM Studio)</option>
+            <option value="none">사용 안 함 (자동 규칙)</option>
+          </select>
+        </label>
+        <input id="set-key" type="password" class="grow" placeholder="API 키(토큰) 입력" />
+      </div>
+      <div class="row" id="row-baseurl" style="display:none">
+        <label class="grow">로컬 서버 주소
+          <input id="set-baseurl" type="text" class="grow" placeholder="http://localhost:11434/v1 (Ollama) / http://localhost:1234/v1 (LM Studio)" />
+        </label>
+      </div>
+      <div class="row" id="row-model-text">
+        <label>모델명(텍스트) <input id="set-model" type="text" placeholder="예: gemini-2.0-flash / 비우면 기본값" style="width:240px" /></label>
+        <label id="lbl-vision" style="display:none">비전 모델(선택) <input id="set-vision" type="text" placeholder="비우면 텍스트 모델 사용" style="width:220px" /></label>
+      </div>
+      <div class="row" id="row-model-local" style="display:none">
+        <label>텍스트 모델
+          <select id="set-model-select" style="min-width:240px"></select>
+        </label>
+        <label>비전 모델(선택)
+          <select id="set-vision-select" style="min-width:220px"></select>
+        </label>
+        <button id="btn-reload-models" type="button">목록 새로고침</button>
+      </div>
+      <hr style="border:none;border-top:1px solid #2a2a3a;margin:14px 0" />
+      <p class="hint"><b>가이드/대본 생성 전용 모델(선택)</b> · 영상 분석은 위 모델(로컬 등)로 하고, <u>창작이 중요한 대본 생성만</u> 고품질 상용 모델로 분리할 수 있어요. 비워두면 위 분석 모델을 그대로 씁니다.</p>
+      <div class="row">
+        <label>생성 AI
+          <select id="set-gen-provider">
+            <option value="">분석과 동일</option>
+            <option value="anthropic">Anthropic Claude</option>
+            <option value="openai">OpenAI (ChatGPT)</option>
+            <option value="gemini">Google Gemini</option>
+          </select>
+        </label>
+        <label id="lbl-gen-model" style="display:none">생성 모델명
+          <input id="set-gen-model" type="text" placeholder="예: claude-opus-4-8" style="width:220px" />
+        </label>
+        <input id="set-gen-key" type="password" class="grow" placeholder="생성 AI의 API 키(이미 저장돼 있으면 비워두세요)" style="display:none" />
+      </div>
+      <p class="hint" id="gen-hint" style="display:none">현재 생성에 쓰이는 모델: <b id="gen-eff"></b></p>
+      <p class="hint" id="local-hint" style="display:none">
+        로컬 팁 · <code>pip install openai</code> 필요.<br>
+        · <b>가장 쉬움(Ollama):</b> 텍스트 <code>qwen3.6:27b</code> + 비전 <code>qwen3-vl:8b-instruct-q8_0</code> (주소 <code>http://localhost:11434/v1</code>).<br>
+        · <b>최고 품질(LM Studio):</b> Qwen3.6-27B GGUF + 짝 <code>mmproj</code> 파일을 같은 폴더에 두면 27B가 이미지까지 처리합니다.
+        주소 <code>http://localhost:1234/v1</code>, 모델명 하나만 넣고 비전 칸은 비워두세요.
+        16GB VRAM이면 <code>IQ4_XS</code>/<code>Q4_K_M</code> 권장(일부 CPU 오프로딩·느림).
+      </p>
+      </div>
+      <div class="row">
+        <button id="btn-save-settings">설정 저장</button>
+        <span id="settings-msg" class="hint"></span>
+      </div>
+    </section>
+
+    <section class="card" id="section-sfx">
+      <h2>1. 효과음 준비</h2>
+      <p class="hint">내 효과음 폴더를 한 번 정리해 두면, 영상에서 어떤 효과음이 언제 쓰였는지 찾아낼 수 있어요. (처음 한 번만, 시간이 좀 걸립니다)</p>
+      <div class="row">
+        <label>개수 제한(선택) <input id="sfx-max" type="number" placeholder="전체" style="width:90px" /></label>
+        <button id="btn-build-sfx">효과음 준비하기</button>
+      </div>
+      <pre id="sfx-log" class="log"></pre>
+    </section>
+
+    <section class="card" id="section-learn">
+      <h2 id="heading-learn">2. 채널 학습</h2>
+      <p class="hint">채널을 넣으면 <b>조회수가 높은 쇼츠부터</b> 골라서 편집 스타일을 배웁니다.</p>
+      <div class="row">
+        <input id="learn-channel" type="text" placeholder="채널 주소 또는 @핸들 (예: @MrBeast)" class="grow" />
+      </div>
+      <div class="row">
+        <label>몇 개 학습 <input id="learn-max" type="number" placeholder="기본 30" style="width:90px" /></label>
+        <label>최소 조회수 <input id="learn-minviews" type="number" placeholder="제한 없음" style="width:130px" /></label>
+      </div>
+      <div class="row options">
+        <label title="영상 화면에 박힌 자막 글자를 읽어옵니다"><input id="learn-ocr" type="checkbox" checked /> 영상 속 자막 글자도 읽기</label>
+        <label id="learn-sep-label" title="배경음악·목소리를 걷어내 효과음만 더 정확히 찾습니다. 대신 많이 느려요."><input id="learn-sep" type="checkbox" /> 효과음 찾기 정확도 높이기 (느림)</label>
+        <label title="예전에 분석한 영상도 처음부터 다시 분석합니다"><input id="learn-force" type="checkbox" /> 이미 한 것도 다시 분석</label>
+        <button id="btn-learn">학습 시작</button>
+      </div>
+      <pre id="learn-log" class="log"></pre>
+    </section>
+
+    <section class="card" id="section-channels">
+      <h2 id="heading-channels">3. 학습된 채널</h2>
+      <div class="row">
+        <select id="channel-select" class="grow"></select>
+        <button id="btn-refresh">새로고침</button>
+        <button id="btn-view-report">리포트 보기</button>
+      </div>
+      <div id="report-view" class="report"></div>
+    </section>
+
+    <section class="card" id="section-guide">
+      <h2 id="heading-guide">4. 가이드 생성</h2>
+      <div class="row">
+        <label><input type="radio" name="mode" value="topic" checked /> 주제</label>
+        <label><input type="radio" name="mode" value="script" /> 완성 대본(스타일 보정)</label>
+      </div>
+      <textarea id="guide-text" rows="4" placeholder="주제 또는 대본을 입력하세요"></textarea>
+      <div class="row">
+        <button id="btn-guide">가이드 생성</button>
+      </div>
+      <pre id="guide-log" class="log"></pre>
+      <div id="guide-result" class="report"></div>
+      <div id="guide-downloads" class="row"></div>
+    </section>
+
+    <section class="card" id="section-saved">
+      <h2 id="heading-saved">5. 저장된 가이드</h2>
+      <p class="hint">위 '학습된 채널'에서 선택한 채널로 이전에 생성한 가이드 목록입니다. 항목을 누르면 내용을 다시 볼 수 있어요.</p>
+      <div class="row">
+        <button id="btn-refresh-guides">목록 새로고침</button>
+        <span id="saved-guides-msg" class="hint"></span>
+      </div>
+      <ul id="saved-guides-list" class="guide-list"></ul>
+      <div id="saved-guide-result" class="report"></div>
+      <div id="saved-guide-downloads" class="row"></div>
+      <div id="saved-guide-revise" class="revise-box"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

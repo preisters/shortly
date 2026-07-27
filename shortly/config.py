@@ -7,6 +7,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .path_policy import PathPolicy
+from .product_profile import (
+    FeatureManifest,
+    ProductKind,
+    feature_manifest_for,
+    resolve_product_kind,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -30,25 +38,35 @@ def _load_dotenv(path: Path, *, override: bool = False) -> None:
             os.environ[key] = value
 
 
+def _portable_enabled() -> bool:
+    return os.environ.get("SHORTLY_PORTABLE", "").strip() not in (
+        "", "0", "false", "False"
+    )
+
+
+def current_product_kind() -> ProductKind:
+    return resolve_product_kind(
+        os.environ.get("SHORTLY_PRODUCT"),
+        portable=_portable_enabled(),
+    )
+
+
+def current_path_policy() -> PathPolicy:
+    return PathPolicy.for_product(
+        current_product_kind(),
+        project_root=PROJECT_ROOT,
+    )
+
+
 def user_data_dir() -> Path:
-    """팀용(포터블/설치형) 사용자 데이터 루트. 개발 모드에서는 PROJECT_ROOT."""
-    override = os.environ.get("SHORTLY_USER_DATA", "").strip()
-    if override:
-        return Path(override)
-    portable = os.environ.get("SHORTLY_PORTABLE", "").strip() not in (
-        "", "0", "false", "False")
-    if portable:
-        local = os.environ.get("LOCALAPPDATA") or str(
-            Path.home() / "AppData" / "Local")
-        return Path(local) / "Shortly"
-    return PROJECT_ROOT
+    """Current product's internal state root."""
+    return current_path_policy().state_root
 
 
 def env_file_path() -> Path:
     """설정 저장에 쓰는 .env 경로(포터블/설치형은 AppData)."""
-    if os.environ.get("SHORTLY_PORTABLE", "").strip() not in (
-            "", "0", "false", "False"):
-        return user_data_dir() / ".env"
+    if _portable_enabled() or current_product_kind() is not ProductKind.LEGACY:
+        return current_path_policy().env_file
     return PROJECT_ROOT / ".env"
 
 
@@ -58,9 +76,8 @@ def _bootstrap_env_files() -> None:
     _load_dotenv(PROJECT_ROOT / ".env", override=False)
     # 설치  Bundled 기본값
     _load_dotenv(PROJECT_ROOT / "env.defaults", override=False)
-    # 런처가 SHORTLY_PORTABLE 을 이미 넣었으면 사용자 .env 가 키를 덮어씀
-    if os.environ.get("SHORTLY_PORTABLE", "").strip() not in (
-            "", "0", "false", "False"):
+    # 명시적 제품 런처는 제품별 사용자 .env 로 기본값을 덮어씀.
+    if _portable_enabled() or current_product_kind() is not ProductKind.LEGACY:
         ud = user_data_dir()
         ud.mkdir(parents=True, exist_ok=True)
         user_env = ud / ".env"
@@ -110,6 +127,11 @@ PORTABLE_GENERATION_MODEL = "claude-opus-4-8"
 
 @dataclass
 class Settings:
+    product: ProductKind = ProductKind.LEGACY
+    features: FeatureManifest = field(
+        default_factory=lambda: feature_manifest_for(ProductKind.LEGACY)
+    )
+
     llm_provider: str = "gemini"
     text_model: str = ""
     vision_model: str = ""
@@ -144,6 +166,8 @@ class Settings:
     local_no_think: bool = True
 
     data_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data")
+    artifact_dir: Path = field(default_factory=lambda: PROJECT_ROOT)
+    log_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "logs")
     sfx_dir: Path = field(
         default_factory=lambda: Path(r"d:\youtube\DaelhyukGisang\sfx_sound")
     )
@@ -174,7 +198,16 @@ class Settings:
 
     @classmethod
     def load(cls) -> "Settings":
-        portable = _env("SHORTLY_PORTABLE", "0") not in ("0", "false", "False", "")
+        portable_flag = _env("SHORTLY_PORTABLE", "0") not in (
+            "0", "false", "False", ""
+        )
+        product = resolve_product_kind(
+            _env("SHORTLY_PRODUCT"),
+            portable=portable_flag,
+        )
+        features = feature_manifest_for(product)
+        policy = PathPolicy.for_product(product, project_root=PROJECT_ROOT)
+        portable = portable_flag or product is ProductKind.TEAM
         provider = (_env("SHORTLY_LLM_PROVIDER", "gemini") or "gemini").lower()
         text_model = _env("SHORTLY_TEXT_MODEL") or _DEFAULT_TEXT_MODELS.get(provider, "")
         vision_model = _env("SHORTLY_VISION_MODEL") or _DEFAULT_VISION_MODELS.get(provider, "")
@@ -191,13 +224,19 @@ class Settings:
             vision_model = PORTABLE_ANALYSIS_MODEL
             gen_provider = "anthropic"
             gen_text_model = PORTABLE_GENERATION_MODEL
-            ud = user_data_dir()
             if not data_dir:
-                data_dir = str(ud / "data")
+                data_dir = str(policy.data_root)
             if not tts_out:
-                tts_out = str(ud / "tts_output")
+                tts_out = str(policy.tts_root)
+        elif product is ProductKind.PERSONAL:
+            if not data_dir:
+                data_dir = str(policy.data_root)
+            if not tts_out:
+                tts_out = str(policy.tts_root)
 
         return cls(
+            product=product,
+            features=features,
             llm_provider=provider,
             text_model=text_model,
             vision_model=vision_model,
@@ -220,6 +259,8 @@ class Settings:
             local_api_key=_env("SHORTLY_LOCAL_API_KEY", "ollama") or "ollama",
             local_no_think=_env("SHORTLY_LOCAL_NO_THINK", "1") not in ("0", "false", "False"),
             data_dir=Path(data_dir) if data_dir else PROJECT_ROOT / "data",
+            artifact_dir=policy.artifact_root,
+            log_dir=policy.log_root,
             sfx_dir=Path(sfx_dir) if sfx_dir else Path(r"d:\youtube\DaelhyukGisang\sfx_sound"),
             max_shorts=_env_int("SHORTLY_MAX_SHORTS", 30),
             min_views=_env_int("SHORTLY_MIN_VIEWS", 0),
@@ -231,7 +272,7 @@ class Settings:
             research_max_queries=_env_int("SHORTLY_RESEARCH_MAX_QUERIES", 5),
             factcheck_enabled=_env("SHORTLY_FACTCHECK", "1") not in ("0", "false", "False", ""),
             portable=portable,
-            sfx_enabled=not portable,
+            sfx_enabled=features.sfx,
         )
 
     def key_for(self, provider: str) -> str:

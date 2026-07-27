@@ -8,6 +8,7 @@ from pathlib import Path
 from support import isolated_shortly_env
 
 from shortly import config
+from shortly.product_profile import ProductKind
 
 
 class SettingsContractTests(unittest.TestCase):
@@ -17,6 +18,8 @@ class SettingsContractTests(unittest.TestCase):
 
         self.assertFalse(settings.portable)
         self.assertTrue(settings.sfx_enabled)
+        self.assertIs(settings.product, ProductKind.LEGACY)
+        self.assertTrue(settings.features.local_llm)
         self.assertEqual(settings.llm_provider, "gemini")
         self.assertEqual(settings.data_dir, config.PROJECT_ROOT / "data")
         self.assertEqual(settings.host, "0.0.0.0")
@@ -24,21 +27,52 @@ class SettingsContractTests(unittest.TestCase):
 
     def test_portable_profile_forces_provider_models_and_user_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
+            artifacts = Path(temp) / "documents" / "Shortly"
             with isolated_shortly_env(
                 SHORTLY_PORTABLE="1",
                 LOCALAPPDATA=temp,
+                SHORTLY_ARTIFACT_DIR=str(artifacts),
             ):
                 settings = config.Settings.load()
 
         user_root = Path(temp) / "Shortly"
         self.assertTrue(settings.portable)
         self.assertFalse(settings.sfx_enabled)
+        self.assertIs(settings.product, ProductKind.TEAM)
+        self.assertFalse(settings.features.local_llm)
         self.assertEqual(settings.llm_provider, "anthropic")
         self.assertEqual(settings.gen_provider, "anthropic")
         self.assertEqual(settings.text_model, config.PORTABLE_ANALYSIS_MODEL)
         self.assertEqual(settings.gen_text_model, config.PORTABLE_GENERATION_MODEL)
         self.assertEqual(settings.data_dir, user_root / "data")
-        self.assertEqual(settings.tts_output_dir, user_root / "tts_output")
+        self.assertEqual(settings.artifact_dir, artifacts)
+        self.assertEqual(settings.log_dir, artifacts / "logs")
+        self.assertEqual(settings.tts_output_dir, artifacts / "tts")
+
+    def test_personal_profile_has_separate_roots_without_changing_providers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            artifacts = Path(temp) / "documents" / "Shortly Personal"
+            with isolated_shortly_env(
+                SHORTLY_PRODUCT="personal",
+                LOCALAPPDATA=temp,
+                SHORTLY_ARTIFACT_DIR=str(artifacts),
+                SHORTLY_LLM_PROVIDER="openai",
+                SHORTLY_TEXT_MODEL="fixture-model",
+            ):
+                settings = config.Settings.load()
+
+        self.assertIs(settings.product, ProductKind.PERSONAL)
+        self.assertFalse(settings.portable)
+        self.assertTrue(settings.features.local_llm)
+        self.assertTrue(settings.features.personal_automation)
+        self.assertEqual(settings.llm_provider, "openai")
+        self.assertEqual(settings.text_model, "fixture-model")
+        self.assertEqual(
+            settings.data_dir,
+            Path(temp) / "ShortlyPersonal" / "data",
+        )
+        self.assertEqual(settings.artifact_dir, artifacts)
+        self.assertEqual(settings.tts_output_dir, artifacts / "tts")
 
     def test_dotenv_override_order_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -72,6 +106,9 @@ class SettingsContractTests(unittest.TestCase):
         for provider in ("local", "ollama", "lmstudio", "llamacpp"):
             self.assertEqual(settings.key_for(provider), "local")
         self.assertEqual(settings.key_for("unsupported"), "")
+
+    def test_product_identity_cannot_be_changed_by_settings_ui(self) -> None:
+        self.assertNotIn("SHORTLY_PRODUCT", config.SAVABLE_KEYS)
 
 
 if __name__ == "__main__":

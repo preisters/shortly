@@ -15,6 +15,9 @@ import traceback
 import webbrowser
 from pathlib import Path
 
+from ..path_policy import PathPolicy
+from ..product_profile import ProductKind
+
 
 def _app_root() -> Path:
     """shortly 패키지가 들어 있는 앱 루트 폴더."""
@@ -33,12 +36,13 @@ def _msg_box(title: str, text: str) -> None:
             pass
 
 
-def _ensure_stdio(user_data: Path) -> Path:
+def _ensure_stdio(log_dir: Path) -> Path:
     """pythonw(GUI) 실행 시 None 인 stdout/stderr 를 로그 파일로 연결.
 
     uvicorn DefaultFormatter 가 sys.stdout.isatty() 를 호출하므로 필수.
     """
-    log_path = user_data / "shortly.log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "shortly.log"
     # append 모드, 라인 버퍼에 가깝게
     log_f = open(log_path, "a", encoding="utf-8", errors="replace", buffering=1)  # noqa: SIM115
     if sys.stdout is None:
@@ -98,6 +102,7 @@ def _uvicorn_log_config() -> dict:
 
 def _prepare_env(app_root: Path) -> Path:
     """번들 환경변수·사용자 데이터 폴더를 준비한다. user_data 경로를 반환."""
+    os.environ["SHORTLY_PRODUCT"] = ProductKind.TEAM.value
     os.environ["SHORTLY_PORTABLE"] = "1"
     os.environ["SHORTLY_HOST"] = os.environ.get("SHORTLY_HOST") or "127.0.0.1"
     os.environ["SHORTLY_PORT"] = os.environ.get("SHORTLY_PORT") or "8756"
@@ -107,15 +112,15 @@ def _prepare_env(app_root: Path) -> Path:
     if ffmpeg_bin.is_dir():
         os.environ["PATH"] = str(ffmpeg_bin) + os.pathsep + os.environ.get("PATH", "")
 
-    local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    user_data = Path(os.environ.get("SHORTLY_USER_DATA") or (Path(local) / "Shortly"))
-    user_data.mkdir(parents=True, exist_ok=True)
-    (user_data / "data").mkdir(exist_ok=True)
-    (user_data / "tts_output").mkdir(exist_ok=True)
+    paths = PathPolicy.for_product(ProductKind.TEAM, project_root=app_root)
+    paths.ensure_dirs()
+    user_data = paths.state_root
 
     os.environ["SHORTLY_USER_DATA"] = str(user_data)
-    os.environ.setdefault("SHORTLY_DATA_DIR", str(user_data / "data"))
-    os.environ.setdefault("SHORTLY_TTS_OUTPUT_DIR", str(user_data / "tts_output"))
+    os.environ.setdefault("SHORTLY_DATA_DIR", str(paths.data_root))
+    os.environ.setdefault("SHORTLY_ARTIFACT_DIR", str(paths.artifact_root))
+    os.environ.setdefault("SHORTLY_LOG_DIR", str(paths.log_root))
+    os.environ.setdefault("SHORTLY_TTS_OUTPUT_DIR", str(paths.tts_root))
 
     # 앱에 포함된 기본 env → 사용자 .env (없을 때만 복사)
     defaults = app_root / "env.defaults"
@@ -150,7 +155,8 @@ def main() -> int:
     try:
         user_data = _prepare_env(app_root)
         # pythonw: stdout/stderr=None → uvicorn isatty 오류 방지
-        _ensure_stdio(user_data)
+        log_dir = Path(os.environ.get("SHORTLY_LOG_DIR") or user_data)
+        _ensure_stdio(log_dir)
 
         # config 가 env 를 읽도록 런처에서 환경 준비 후 import
         from shortly.config import get_settings

@@ -22,7 +22,23 @@ pip install -r requirements.txt
 
 - `SHORTLY_LLM_PROVIDER`: `gemini` | `openai` | `anthropic` | `local` | `none`
 - 각 제공자 API 키(`GEMINI_API_KEY` 등). 없으면 분석/생성은 휴리스틱으로 대체됩니다.
-- `SHORTLY_SFX_DIR`: 참조 효과음 폴더(기본 `d:\youtube\DaelhyukGisang\sfx_sound`)
+- `SHORTLY_SFX_DIR`: 개인/legacy 환경의 참조 효과음 폴더
+
+### 제품 프로파일과 저장 위치
+
+일반 개발 실행은 기존 동작을 보존하는 `legacy` 프로파일입니다. 팀·개인 전용 launcher는
+`SHORTLY_PRODUCT`를 각각 `team`, `personal`로 고정하며 설정 화면에서 제품 종류를
+바꾸지 않습니다.
+
+| 프로파일 | 내부 상태·설정 | 사용자 결과물·로그 |
+|---|---|---|
+| `legacy` | 저장소와 기존 환경변수 경로 | 기존 경로 유지 |
+| `team` | `%LOCALAPPDATA%\Shortly\` | Windows Documents의 `Shortly\` |
+| `personal` | `%LOCALAPPDATA%\ShortlyPersonal\` | Windows Documents의 `Shortly Personal\` |
+
+`SHORTLY_USER_DATA`, `SHORTLY_DATA_DIR`, `SHORTLY_ARTIFACT_DIR`,
+`SHORTLY_LOG_DIR`, `SHORTLY_TTS_OUTPUT_DIR`로 명시적으로 재정의할 수 있습니다.
+기존 데이터는 제품 프로파일 사이에서 자동 이동하거나 자동 탐색하지 않습니다.
 
 ### 로컬 모델 사용 (Ollama / LM Studio)
 
@@ -95,7 +111,8 @@ python -m shortly build-installer
 - 결과물:
   - `dist/shortly-app/` — `Shortly 시작.vbs` 더블클릭
   - `dist/ShortlySetup.exe` — Inno Setup 이 설치돼 있으면 자동 생성 (관리자 권한 불필요)
-- 사용자 데이터: `%LOCALAPPDATA%\Shortly\` (API 키·학습 결과, 업데이트해도 유지)
+- 내부 상태·API 설정: `%LOCALAPPDATA%\Shortly\` (업데이트해도 유지)
+- TTS·사용자 결과물·로그: Windows Documents의 `Shortly\`
 
 ## 사용법 (웹 UI)
 

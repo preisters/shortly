@@ -1,0 +1,1 @@
+"""Shortly regression contract tests."""

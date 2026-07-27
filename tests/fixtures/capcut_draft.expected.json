@@ -1,0 +1,100 @@
+{
+  "shortly_schema": "capcut-draft-v0",
+  "title": "테스트가 큰일났다고 함",
+  "hook": "테스트가 큰일났다고 함",
+  "duration": 6600000,
+  "canvas_config": {
+    "width": 1080,
+    "height": 1920,
+    "ratio": "9:16"
+  },
+  "materials": {
+    "texts": [
+      {
+        "id": "fixture-id-01",
+        "type": "text",
+        "content": "첫 장면에서 놀랐다고 함",
+        "font_size": 12,
+        "text_color": "#FFFFFF"
+      },
+      {
+        "id": "fixture-id-05",
+        "type": "text",
+        "content": "마지막 반전이 나왔다고",
+        "font_size": 12,
+        "text_color": "#FFFFFF"
+      }
+    ],
+    "audios": [
+      {
+        "id": "fixture-id-03",
+        "type": "sound_effect",
+        "name": "기본효과",
+        "note": "sfx_sound 라이브러리에서 해당 이름 파일 사용"
+      },
+      {
+        "id": "fixture-id-07",
+        "type": "sound_effect",
+        "name": "기본효과",
+        "note": "sfx_sound 라이브러리에서 해당 이름 파일 사용"
+      }
+    ]
+  },
+  "tracks": [
+    {
+      "type": "text",
+      "segments": [
+        {
+          "id": "fixture-id-02",
+          "material_id": "fixture-id-01",
+          "target_timerange": {
+            "start": 0,
+            "duration": 3200000
+          },
+          "note": "나레이션: 첫 번째 장면에서 모두가 놀랐다고 함."
+        },
+        {
+          "id": "fixture-id-06",
+          "material_id": "fixture-id-05",
+          "target_timerange": {
+            "start": 3200000,
+            "duration": 3400000
+          },
+          "note": "나레이션: 마지막에는 예상 못 한 반전이 나왔다고."
+        }
+      ]
+    },
+    {
+      "type": "audio",
+      "attribute": "sfx",
+      "segments": [
+        {
+          "id": "fixture-id-04",
+          "material_id": "fixture-id-03",
+          "target_timerange": {
+            "start": 0,
+            "duration": 1200000
+          }
+        },
+        {
+          "id": "fixture-id-08",
+          "material_id": "fixture-id-07",
+          "target_timerange": {
+            "start": 3200000,
+            "duration": 1200000
+          }
+        }
+      ]
+    },
+    {
+      "type": "audio",
+      "attribute": "narration_tts_placeholder",
+      "segments": []
+    }
+  ],
+  "notes": [
+    "이 파일은 편집 설계도(초안)입니다.",
+    "효과음 이름은 sfx_sound 폴더의 파일과 매칭해 배치하세요.",
+    "나레이션 트랙에는 생성한 TTS 음성을 올리세요."
+  ]
+}

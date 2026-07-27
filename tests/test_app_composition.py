@@ -46,7 +46,7 @@ class _FakeService:
     "FastAPI runtime dependencies are unavailable",
 )
 class AppCompositionTests(unittest.TestCase):
-    def test_product_factories_return_distinct_apps_with_same_routes(self) -> None:
+    def test_product_factories_share_legacy_routes_and_personal_adds_automation(self) -> None:
         with isolated_shortly_env():
             team = create_team_app()
             personal = create_personal_app()
@@ -57,11 +57,18 @@ class AppCompositionTests(unittest.TestCase):
         self.assertEqual(personal.state.product, ProductKind.PERSONAL.value)
         self.assertFalse(team.state.features.local_llm)
         self.assertTrue(personal.state.features.local_llm)
-        self.assertEqual(route_manifest(personal), route_manifest(legacy_app.app))
+        legacy_routes = set(route_manifest(legacy_app.app))
+        personal_routes = set(route_manifest(personal))
+        self.assertTrue(legacy_routes.issubset(personal_routes))
+        self.assertIn(("POST", "/api/personal/manifests"), personal_routes)
+        self.assertNotIn(
+            ("POST", "/api/personal/manifests"),
+            set(route_manifest(team)),
+        )
         self.assertNotIn(("GET", "/api/local-models"), route_manifest(team))
         self.assertIn(("GET", "/api/local-models"), route_manifest(personal))
         self.assertEqual(len(team.routes), 23)
-        self.assertEqual(len(personal.routes), 24)
+        self.assertGreater(len(personal.routes), len(legacy_app.app.routes))
 
     def test_team_http_surface_hides_local_provider_features(self) -> None:
         with isolated_shortly_env():
@@ -83,6 +90,21 @@ class AppCompositionTests(unittest.TestCase):
         self.assertNotIn("Ollama", index_response.text)
         self.assertEqual(local_response.status_code, 404)
         self.assertNotIn("local_base_url", settings_response.json())
+
+    def test_personal_automation_api_is_loopback_only(self) -> None:
+        with isolated_shortly_env():
+            app = create_personal_app()
+            personal_settings = Settings.load()
+            personal_settings.lan_only = False
+            with patch.object(
+                legacy_app,
+                "get_settings",
+                return_value=personal_settings,
+            ):
+                with TestClient(app, client=("192.168.1.10", 50000)) as client:
+                    blocked = client.get("/api/personal/automation/status")
+
+        self.assertEqual(blocked.status_code, 403)
 
     def test_request_scope_selects_injected_service(self) -> None:
         fake = _FakeService()

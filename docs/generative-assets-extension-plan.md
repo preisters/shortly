@@ -1,7 +1,7 @@
 # 생성형 에셋 확장 설계
 
 작성일: 2026-07-27  
-검토 범위: 개인 자동화판의 향후 확장 지점. 이미지·영상 생성 기능 자체는 이번 단계에서 구현하지 않는다.
+검토 범위: 개인 자동화판의 확장 지점과 2026-07-27 구현 기준선.
 
 문서 역할: 이 문서는 생성형 에셋의 기술 확장 지점을 설명한다. 승인된 제품 정책과
 예산은 [`product-decisions.md`](product-decisions.md), 단계별 PR은
@@ -30,10 +30,25 @@
 
 - **[확인]** `shortly/generate/image_reco.py`는 `guide["segments"]`에 `image_suggestions`, `media_suggestions`, `effect_suggestions` 문자열 목록을 추가한다.
 - **[확인]** `shortly/generate/capcut_export.py`는 위 추천 문자열을 사용하지만 실제 추천 이미지를 내려받거나 생성하지 않는다. 직접 내보내기에서는 자리표시자 컷 이미지를 만들 수 있다.
-- **[확인]** 이미지·영상 생성 공급자, `AssetType`, `CutManifest`, 영속 작업 큐, 비용 원장, 승인 UI는 아직 없다.
+- **[확인]** `shortly/core/domain/assets.py`와
+  `shortly/core/use_cases/build_cut_manifest.py`에 versioned `CutManifest`,
+  `AssetType`, 결정론적 기본 분류가 구현됐다.
+- **[확인]** `shortly/apps/personal/automation/`에 SQLite 작업·승인·사용량·선택
+  기록, 예산 gate, 결정론적 작업 그래프가 구현됐다.
+- **[확인]** 개인판에 OpenAI `gpt-image-2` 이미지 adapter와 Google
+  `gemini-omni-flash-preview` 영상 adapter가 구현됐다. 자동 테스트는 fake
+  provider만 실제 실행하며 유료 API는 호출하지 않는다.
+- **[확인]** 생성 이미지 원본 보존과 1080×1920 JPEG 크롭, 단일 후보 자동 선택,
+  수동 재선택 기록을 지원한다.
+- **[확인]** `/personal/assets` UI에서 컷 유형 변경, 예상 비용 확인, 일회용 승인,
+  생성 실행, 기술/Qwen 검수, CapCut prepare/commit을 제공한다.
 - **[확인]** 현재 웹 작업 상태는 `shortly/web/app.py`의 프로세스 메모리 딕셔너리·스레드·큐에만 존재하며 재시작 복구, TTL 정리, 취소를 제공하지 않는다.
 - **[확인]** 직접 CapCut 내보내기는 템플릿 프로젝트를 복사해 복사본의 JSON과 프로젝트 ID를 수정하고 CapCut 루트 메타데이터에 등록한다.
-- **[제안]** 따라서 첫 확장은 생성 API 연결이 아니라, 기존 `guide`를 버전 있는 `CutManifest`로 변환하고 사람이 검토할 수 있게 만드는 단계여야 한다.
+- **[확인 필요]** 실제 키를 사용한 공급자별 1회 smoke test와 실제 사용 중인 CapCut
+  버전에서 이미지·영상 트랙을 여는 E2E는 아직 수동 검증이 필요하다.
+- **[확인 필요]** Gemini Omni Flash는 preview이며 현재 adapter는 공식 예제와 같은
+  inline base64 응답만 지원한다. URI delivery가 필요해지면 별도 다운로드 상태
+  머신을 추가해야 한다.
 
 ## 2. 권장 흐름
 

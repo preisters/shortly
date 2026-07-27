@@ -19,8 +19,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..config import get_settings, save_settings
-from .. import service
+from .. import service as default_service
 from ..llm import get_llm
+from .composition import ServiceProxy
+
+service = ServiceProxy(default_service)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -348,7 +351,8 @@ def api_sfx_build(req: SfxRequest) -> dict:
             status_code=403,
             detail="포터블 버전에서는 효과음 기능을 사용하지 않습니다.",
         )
-    job_id = _start_job("build-sfx", lambda prog: service.build_sfx_index(
+    build_sfx_index = service.build_sfx_index
+    job_id = _start_job("build-sfx", lambda prog: build_sfx_index(
         settings, progress=prog, max_items=req.max_items, probe=req.probe))
     return {"job_id": job_id}
 
@@ -356,7 +360,8 @@ def api_sfx_build(req: SfxRequest) -> dict:
 @app.post("/api/learn")
 def api_learn(req: LearnRequest) -> dict:
     settings = get_settings()
-    job_id = _start_job("learn", lambda prog: service.learn_channel(
+    learn_channel = service.learn_channel
+    job_id = _start_job("learn", lambda prog: learn_channel(
         req.channel, settings, progress=prog, max_count=req.max_count,
         min_views=req.min_views, do_ocr=req.do_ocr,
         separate=req.separate_vocals, force=req.force))
@@ -366,7 +371,8 @@ def api_learn(req: LearnRequest) -> dict:
 @app.post("/api/guide")
 def api_guide(req: GuideRequest) -> dict:
     settings = get_settings()
-    job_id = _start_job("guide", lambda prog: service.generate_guide(
+    generate_guide = service.generate_guide
+    job_id = _start_job("guide", lambda prog: generate_guide(
         req.channel, req.text, is_script=req.is_script, settings=settings, progress=prog))
     return {"job_id": job_id}
 
@@ -374,7 +380,8 @@ def api_guide(req: GuideRequest) -> dict:
 @app.post("/api/guide-revise")
 def api_guide_revise(req: GuideRevisionRequest) -> dict:
     settings = get_settings()
-    job_id = _start_job("guide-revise", lambda prog: service.revise_guide(
+    revise_guide = service.revise_guide
+    job_id = _start_job("guide-revise", lambda prog: revise_guide(
         req.channel, req.name, req.instruction, settings=settings, progress=prog))
     return {"job_id": job_id}
 

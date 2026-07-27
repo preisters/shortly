@@ -1,0 +1,1 @@
+"""Personal automation application."""

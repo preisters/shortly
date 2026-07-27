@@ -159,10 +159,11 @@ def main() -> int:
         _ensure_stdio(log_dir)
 
         # config 가 env 를 읽도록 런처에서 환경 준비 후 import
+        from shortly.apps.team.api import create_app
         from shortly.config import get_settings
-        from shortly.web.app import app as fastapi_app
 
         settings = get_settings(reload=True)
+        fastapi_app = create_app()
         host = settings.host or "127.0.0.1"
         # 0.0.0.0 바인딩이어도 브라우저는 localhost 로
         open_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host

@@ -1,52 +1,86 @@
 # 생성형 에셋 확장 설계
 
 작성일: 2026-07-27  
-범위: 개인 자동화판의 확장 지점 설계. 이미지·영상 생성 기능 자체는 구현하지 않는다.
+검토 범위: 개인 자동화판의 향후 확장 지점. 이미지·영상 생성 기능 자체는 이번 단계에서 구현하지 않는다.
 
-## 1. 설계 방향
+문서 역할: 이 문서는 생성형 에셋의 기술 확장 지점을 설명한다. 승인된 제품 정책과
+예산은 [`product-decisions.md`](product-decisions.md), 단계별 PR은
+[`implementation-roadmap.md`](implementation-roadmap.md)를 우선한다.
 
-첫 단계는 “에이전트가 알아서 끝까지 생성”이 아니라, 기존 `guide.json`에서 명시적 `CutManifest`를 만들고 각 단계를 상태가 보이는 작업 그래프로 실행하는 것이다.
+2026-07-27 제품 결정 반영:
 
-LLM은 분류, 검색어/프롬프트 작성, 후보 평가처럼 판단이 필요한 노드에만 사용한다. 파일 검증, 크롭, 해상도 변환, 재시도 횟수, 비용 제한, CapCut 삽입, 승인 게이트는 결정론적 코드로 처리한다.
+- 후보는 컷당 1개, 자동 재생성은 1회다.
+- 사실성이 중요한 컷은 초기에는 `MANUAL_REQUIRED`다.
+- 모든 유료 생성은 실행 전에 사람 승인을 받으며 자동 유료 공급자 폴백은 없다.
+- 이미지 첫 adapter는 OpenAI `gpt-image-2`를 대상으로 한다.
+- 영상 첫 평가 adapter는 Google `gemini-omni-flash-preview`다. preview이므로
+  production 고정은 실측 후 결정한다.
+- CapCut 내보내기는 `PrepareExport`와 `CommitExport`로 나눈다.
+- Qwen 최종 검수는 `ReviewReport`만 만들고 결과물을 수정하지 못한다.
+
+## 1. 사실, 제안, 추가 확인의 구분
+
+이 문서에서 다음 표기를 사용한다.
+
+- **[확인]** 현재 저장소 코드에서 직접 확인한 사실
+- **[제안]** 향후 구현을 위한 권장 설계
+- **[확인 필요]** 코드만으로 결정할 수 없거나 실제 서비스·CapCut에서 검증해야 하는 사항
+
+현재 구현 상태는 다음과 같다.
+
+- **[확인]** `shortly/generate/image_reco.py`는 `guide["segments"]`에 `image_suggestions`, `media_suggestions`, `effect_suggestions` 문자열 목록을 추가한다.
+- **[확인]** `shortly/generate/capcut_export.py`는 위 추천 문자열을 사용하지만 실제 추천 이미지를 내려받거나 생성하지 않는다. 직접 내보내기에서는 자리표시자 컷 이미지를 만들 수 있다.
+- **[확인]** 이미지·영상 생성 공급자, `AssetType`, `CutManifest`, 영속 작업 큐, 비용 원장, 승인 UI는 아직 없다.
+- **[확인]** 현재 웹 작업 상태는 `shortly/web/app.py`의 프로세스 메모리 딕셔너리·스레드·큐에만 존재하며 재시작 복구, TTL 정리, 취소를 제공하지 않는다.
+- **[확인]** 직접 CapCut 내보내기는 템플릿 프로젝트를 복사해 복사본의 JSON과 프로젝트 ID를 수정하고 CapCut 루트 메타데이터에 등록한다.
+- **[제안]** 따라서 첫 확장은 생성 API 연결이 아니라, 기존 `guide`를 버전 있는 `CutManifest`로 변환하고 사람이 검토할 수 있게 만드는 단계여야 한다.
+
+## 2. 권장 흐름
+
+LLM 판단과 결정론적 처리를 분리한다. LLM은 분류, 검색어·프롬프트 초안, 후보 의미 평가에만 사용하고 파일 검증, 비율 변환, 상태 전이, 재시도, 예산 제한, CapCut 삽입은 일반 코드가 담당한다.
 
 ```mermaid
 flowchart LR
-    GUIDE["ProductionGuide"] --> PLAN["컷 계획<br/>CutManifest"]
-    PLAN --> CLASSIFY["AssetType 분류"]
-    CLASSIFY --> APPROVE1{"생성 계획 승인"}
-    APPROVE1 --> QUEUE["생성 작업 큐"]
-    QUEUE --> GEN["이미지/영상 공급자"]
-    GEN --> POST["크롭·해상도·검증"]
+    GUIDE["기존 guide.json"] --> CONVERT["Guide → CutManifest 변환"]
+    CONVERT --> CLASSIFY["AssetType 분류"]
+    CLASSIFY --> PLAN_REVIEW{"생성 계획 승인"}
+    PLAN_REVIEW --> QUEUE["영속 작업 큐"]
+    QUEUE --> PROVIDER["이미지·영상 공급자"]
+    PROVIDER --> POST["검증·크롭·변환"]
     POST --> RANK["후보 비교"]
-    RANK --> APPROVE2{"사람 승인/교체"}
-    APPROVE2 --> INSERT["CapCut AssetInserter"]
-    INSERT --> REVIEW["완성 결과 검수"]
+    RANK --> REVIEW{"사람 승인·교체"}
+    REVIEW --> INSERT["CapCut AssetInserter"]
+    INSERT --> FINAL["프로젝트 구조 검증"]
 ```
 
-## 2. 핵심 데이터 모델
+## 3. 데이터 모델
 
-### AssetType
+### 3.1 AssetType
 
-코어 도메인에 문자열 enum으로 둔다.
+**[제안]** `shortly/core/domain/assets.py`에 문자열 enum으로 둔다. 초기 모듈형 단일 패키지 구조를 먼저 적용하므로 별도 배포 패키지를 전제로 하지 않는다.
 
 ```text
-REAL_PHOTO        실제 촬영/제품/인물 사진
-STOCK_IMAGE       라이선스가 확인된 스톡 이미지
-GENERATED_IMAGE   생성형 이미지
-GENERATED_VIDEO   생성형 영상
-MEME              밈/반응 이미지
-SCREENSHOT        웹/앱/자료 화면
-MANUAL_REQUIRED   사람이 직접 넣어야 하는 자산
-NONE              자산 없이 텍스트/배경만 사용
+REAL_PHOTO
+STOCK_IMAGE
+GENERATED_IMAGE
+GENERATED_VIDEO
+MEME
+SCREENSHOT
+MANUAL_REQUIRED
+NONE
 ```
 
-`AssetType`은 “어디서 얻는가”를 뜻하고, `MediaKind`(image/video/audio), `UsageRole`(background/overlay/evidence/product), `RightsStatus`는 별도 필드로 둔다. 하나의 enum에 모든 의미를 섞지 않는다.
+`AssetType` 하나에 모든 의미를 넣지 않는다. 다음 축을 별도 필드로 둔다.
 
-### CutManifest
+- `MediaKind`: image, video, audio
+- `UsageRole`: background, overlay, evidence, product
+- `RightsStatus`: unknown, licensed, generated, restricted
 
-위치: 공통 코어의 `domain/assets.py` 후보. 팀판도 추천 표시나 수동 자산 연결에 쓸 수 있으므로 개인 전용으로 두지 않는다.
+### 3.2 CutManifest
 
-권장 상위 필드:
+**[제안]** `CutManifest`는 공통 도메인 계약으로 두되, 자동 생성 실행과 공급자 정보는 개인판 모듈이 소유한다. 팀판도 향후 명세를 읽거나 수동 에셋을 연결할 수 있어야 하기 때문이다.
+
+상위 필드:
 
 ```text
 manifest_id, schema_version, project_id, guide_revision
@@ -61,7 +95,7 @@ cut_id, segment_id, order
 start_ms, duration_ms
 narration, caption
 visual_intent, required_subjects, prohibited_content
-asset_type, media_kind, usage_role
+asset_type, media_kind, usage_role, rights_status
 source_query, generation_prompt, negative_prompt
 target_crop, safe_area
 candidates[], selected_candidate_id
@@ -76,43 +110,50 @@ candidate_id, provider, provider_job_id
 source_uri 또는 local_path
 mime_type, width, height, duration_ms
 prompt_revision, seed, model
-rights/provenance, checksum
+provenance, checksum
 quality_scores, moderation_status
 cost_record_id, status, error
 ```
 
-모든 ID는 재실행해도 동일 컷을 식별할 수 있어야 한다. 배열 인덱스를 식별자로 쓰지 않는다.
+ID는 재실행해도 같은 컷을 식별할 수 있어야 한다. 배열 인덱스를 영속 ID로 사용하지 않는다.
 
-## 3. 구성요소 위치와 인터페이스
+### 3.3 현재 데이터와의 연결
 
-| 구성요소 | 권장 위치 | 책임 |
-|---|---|---|
-| `AssetType`, `CutManifest` | 공통 core/domain | 앱·공급자와 무관한 계약 |
-| 가이드→컷 변환기 | core/use_cases 또는 personal/assets/planning | 기존 guide를 manifest로 변환 |
-| AssetType 분류기 | personal/assets/classification | 규칙 우선, 필요 시 LLM |
-| 이미지 생성 포트 | core/ports/assets | 요청/작업/결과 계약 |
-| 영상 생성 포트 | core/ports/assets | 비동기 생성/상태 조회/취소 |
-| OpenAI/Google 어댑터 | providers/assets/openai, google | 공급자 SDK와 오류/사용량 변환 |
-| 생성 작업 큐 | personal/jobs | idempotency, 동시성, 우선순위 |
-| 상태/재시도 저장 | personal/jobs/repository | 영속 상태머신과 backoff |
-| 비용/사용량 기록 | core domain + personal persistence | 공급자 사용량을 정규화 |
-| 이미지 후처리 | personal/media/image_pipeline | crop/resize/pad/format |
-| CapCut AssetInserter | capcut 패키지 | 승인된 artifact를 컷에 배치 |
-| 후보 검수기 | personal/assets/review | 기술 검증 + 의미 평가 |
-| 승인·교체 UI | apps/personal | 후보 비교, 업로드, 선택, 이력 |
-| 작업 그래프 | personal/orchestration | 결정론적 DAG 실행과 승인 게이트 |
+- **[확인]** 현재 변환 입력은 `guide.json`의 `segments`이며, 각 세그먼트에는 대사·자막·시간·SFX·추천 정보가 들어간다.
+- **[제안]** `GuideToCutManifest` 변환기를 별도 use case로 만들고 기존 `guide.json`을 변경하지 않는다.
+- **[제안]** 첫 스키마는 기존 세그먼트 한 개를 컷 한 개로 변환하되, 이후 세그먼트 안의 `cut_count`를 여러 `CutSpec`으로 확장할 수 있게 한다.
+- **[확인 필요]** 실제 편집에서는 세그먼트와 컷이 1:1인지, 한 대사 안에서 이미지가 몇 번 바뀌는지가 채널별로 다르므로 표본 프로젝트로 규칙을 정해야 한다.
 
-공통 core에는 공급자 SDK나 Pillow/FFmpeg를 import하지 않는다. 포트의 입력/출력은 도메인 모델과 파일 참조만 사용한다.
+## 4. 구성요소와 위치
 
-## 4. 공급자 인터페이스
+| 구성요소 | 권장 위치 | 현재 코드 연결점 | 상태 |
+|---|---|---|---|
+| `AssetType`, `CutManifest` | `shortly/core/domain/assets.py` | `guide["segments"]` | 제안 |
+| Guide 변환기 | `shortly/core/use_cases/build_cut_manifest.py` | `shortly/generate/guide.py`, `image_reco.py` 출력 | 제안 |
+| 이미지 생성 포트 | `shortly/core/ports/assets.py` | 없음 | 제안 |
+| 영상 생성 포트 | `shortly/core/ports/assets.py` | 없음 | 제안 |
+| OpenAI 어댑터 | `shortly/personal/assets/providers/openai.py` | 현 LLM용 OpenAI 어댑터와 별개 | 제안 |
+| Google 어댑터 | `shortly/personal/assets/providers/google.py` | 현 `shortly/llm/gemini.py`와 별개 | 제안 |
+| 작업 큐·상태 저장 | `shortly/personal/jobs/` | 현 웹 인메모리 jobs를 재사용하지 않음 | 제안 |
+| 비용·사용량 | `shortly/personal/usage/` | 없음 | 제안 |
+| 이미지 후처리 | `shortly/personal/media/image_pipeline.py` | Pillow는 이미 사용 중 | 제안 |
+| 후보 검수기 | `shortly/personal/assets/review.py` | 없음 | 제안 |
+| 승인·교체 UI | `shortly/apps/personal/` | 현 단일 정적 UI를 단계적으로 분리 | 제안 |
+| CapCut 삽입기 | `shortly/integrations/capcut/assets.py` | `shortly/generate/capcut_export.py` | 제안 |
+| 작업 그래프 | `shortly/personal/orchestration/` | 현 `service.py` 순차 흐름 | 제안 |
 
-이미지와 영상은 공통 기반 타입을 공유하되 억지로 하나의 메서드로 합치지 않는다. 영상은 대개 비동기 polling이 필요하기 때문이다.
+공통 코어는 공급자 SDK, Pillow, FFmpeg를 직접 import하지 않는다. 포트의 요청·응답 데이터와 파일 참조만 소유한다.
+
+## 5. 공급자 포트
+
+**[제안]** 이미지와 영상은 공통 타입을 공유하되 비동기 특성이 달라 포트를 분리한다.
 
 ```python
 class ImageGenerationProvider(Protocol):
     capabilities: ImageCapabilities
-    def generate(self, request: ImageGenerationRequest) -> GenerationSubmission: ...
-    def get_result(self, job_id: str) -> GenerationResult: ...
+    def submit(self, request: ImageGenerationRequest) -> GenerationSubmission: ...
+    def get_status(self, job_id: str) -> GenerationStatus: ...
+    def fetch_result(self, job_id: str) -> GenerationResult: ...
     def cancel(self, job_id: str) -> None: ...
 
 class VideoGenerationProvider(Protocol):
@@ -123,23 +164,19 @@ class VideoGenerationProvider(Protocol):
     def cancel(self, job_id: str) -> None: ...
 ```
 
-capability에는 지원 비율, 최대 크기/길이, 참조 이미지, seed, negative prompt, 오디오 생성, 가격 단위가 포함된다. 공급자 선택기는 “모델명 문자열”이 아니라 capability와 정책을 보고 선택한다.
+capability에는 지원 비율, 크기·길이, 참조 이미지, seed, negative prompt, 오디오 생성 여부와 가격 단위를 둔다. 모델명 문자열만 보고 공급자를 고르지 않는다.
 
-오류는 최소한 다음으로 정규화한다.
+오류는 최소한 인증 실패, 잘못된 요청, moderation 거절, rate limit, 일시 장애, quota·예산 초과, artifact 다운로드 실패로 정규화한다. 다운로드 실패는 공급자 작업을 다시 생성하지 않고 기존 job ID로 재시도한다.
 
-- `AuthenticationError`: 재시도 금지, 사용자 조치
-- `InvalidRequestError`: 프롬프트/크기 수정 후 재제출
-- `ModerationRejected`: 자동 폴백 여부를 정책으로 결정
-- `RateLimited`: backoff 재시도
-- `TransientProviderError`: 제한 횟수 재시도
-- `QuotaOrBudgetExceeded`: 즉시 중단 및 승인 요청
-- `ArtifactDownloadError`: 생성 job을 다시 만들지 말고 다운로드만 재시도
+**[확인]** 2026-07-27 공식 문서 기준 첫 평가 대상은 OpenAI `gpt-image-2`와 Google
+`gemini-omni-flash-preview`다. 후자는 preview이고 9:16·image-to-video를 지원한다.
+API 응답 보존 정책, snapshot과 가격 단위는 구현 시점에 다시 확인해야 한다.
 
-## 5. 작업 큐와 상태 머신
+## 6. 작업 큐, 재시도, 비용
 
-초기에는 외부 브로커보다 SQLite 기반 로컬 큐가 적절하다. 현재 단일 사용자 로컬 앱이고, 재시작 후 복구와 트랜잭션이 필요하기 때문이다. 다만 실제 저장 기술은 구현 전 결정한다.
+**[확인]** 현재 저장소에는 일반 목적 영속 큐나 데이터베이스가 없다.
 
-권장 상태:
+**[제안]** 첫 개인판은 별도 브로커보다 SQLite 기반 로컬 저장소로 시작한다. 이는 제안이지 현재 구현 사실이 아니다.
 
 ```mermaid
 stateDiagram-v2
@@ -161,13 +198,13 @@ stateDiagram-v2
     QUEUED --> CANCELLED
 ```
 
-각 작업에는 `idempotency_key = project + cut + provider + request_hash + attempt_policy`를 둔다. 앱 재시작 후 `SUBMITTED/RUNNING` 작업은 공급자 job ID로 재조회하며, 같은 생성 요청을 무조건 다시 과금하지 않는다.
+- idempotency key: project + cut + provider + request hash + attempt policy
+- `SUBMITTED` 이후에는 공급자 job ID를 먼저 저장한다.
+- 재시도는 횟수뿐 아니라 최대 비용과 경과 시간으로 제한한다.
+- 예상 비용과 공급자 확정 비용을 분리한다.
+- 프로젝트·단계·공급자별 예산과 사람 승인 임계값을 둔다.
 
-재시도 정책은 공급자 오류 유형별로 다르게 하고, 최대 횟수뿐 아니라 최대 비용과 최대 경과 시간도 제한한다.
-
-## 6. 비용 및 사용량
-
-`UsageRecord` 권장 필드:
+권장 `UsageRecord`:
 
 ```text
 record_id, project_id, cut_id, job_id
@@ -178,100 +215,37 @@ attempt, cached, started_at, completed_at
 provider_request_id
 ```
 
-비용은 제출 전 예상치와 완료 후 실제치를 분리한다. 프로젝트/단계/공급자별 예산을 두고 다음 게이트를 제공한다.
+가격표는 코드 상수가 아니라 출처와 유효일을 포함한 설정으로 관리한다.
 
-- 단일 생성 비용 한도
-- 컷별 후보 수 한도
-- 프로젝트 총예산
-- 자동 재시도 예산
-- 예산 초과 전 사람 승인
+## 7. 이미지 후처리와 검수
 
-가격표는 코드 상수가 아니라 날짜와 출처가 있는 provider pricing 설정으로 관리해야 한다.
+**[제안]** 원본 생성물은 불변으로 보존하고 후처리 결과를 새 artifact로 만든다.
 
-## 7. 이미지 후처리
+결정론적 검증:
 
-위치: 개인 media pipeline. 생성 어댑터 안에 넣지 않는다.
+- MIME·파일 서명·디코딩 가능 여부
+- 원본 해상도, 종횡비, 길이
+- EXIF 방향과 알파 처리
+- 9:16 목표 캔버스의 crop, pad, resize
+- safe area 침범과 텍스트 잘림
+- checksum, provenance, 중복 perceptual hash
 
-단계:
+의미 기반 후보 평가는 자동 승인 근거가 아니라 정렬 신호로만 사용한다. UI는 후보 나란히 보기, 원본·후처리 비교, 재생성, 로컬 파일 교체, crop 수정, 승인·거절 이유를 제공한다. 선택 이력은 바로 학습시키지 않고 `SelectionEvent`로 축적한다.
 
-1. MIME/파일 서명/디코딩 검증
-2. 해상도와 종횡비 기록
-3. 목표 9:16 캔버스에 맞춘 crop/pad 전략 결정
-4. 얼굴/주요 피사체와 자막 safe area를 고려한 crop
-5. 색공간, 방향(EXIF), 알파 처리
-6. 목표 해상도 변환과 품질 설정
-7. checksum과 파생 관계 저장
-8. 썸네일/비교용 preview 생성
+## 8. CapCut 삽입기
 
-원본 생성물은 불변으로 보존하고, 후처리 결과를 새 artifact로 만든다. 사람의 수동 crop도 동일한 파생 이력으로 기록한다.
+- **[확인]** `shortly/generate/capcut_export.py`는 중립 `capcut-draft-v0` 생성과 실제 템플릿 복제·등록이라는 서로 다른 책임을 한 파일에 가진다.
+- **[확인]** 템플릿 복제 경로는 복사본을 수정하지만, 공식 스키마 버전 검증·원자적 트랜잭션·실패 시 전체 롤백은 없다.
+- **[제안]** `AssetInserter`는 승인된 `CutManifest`와 후보만 입력받고, 현재 exporter 앞에 별도 경계로 추가한다.
+- **[제안]** 임시 디렉터리에서 파일 복사와 JSON 변경을 완료하고 구조 검증 후 최종 프로젝트명으로 원자적 이동·등록한다.
+- **[제안]** 원본 템플릿은 절대 수정하지 않고 삽입 manifest와 생성·복사 파일 목록을 남긴다.
+- **[확인 필요]** CapCut 버전별 material 필드, 이미지·영상 트랙 예시, Windows/macOS 프로젝트 루트는 익명화된 실제 fixture로 검증해야 한다.
 
-## 8. CapCut 에셋 삽입기
+현재 추천 문구만 있고 실제 파일이 없는 컷은 계속 `MANUAL_REQUIRED`로 내보내는 호환 경로를 유지한다.
 
-`AssetInserter`는 현재 `capcut_export.py`의 프로젝트 복제/등록 로직 위에 별도 계층으로 둔다.
+## 9. 작업 그래프와 멀티 에이전트
 
-입력:
-
-- 승인된 `CutManifest`
-- 선택된 `AssetCandidate`
-- 타임라인 시간 범위
-- crop/transform/animation 명세
-
-출력:
-
-- 삽입된 material/segment ID
-- 생성/복사된 파일 목록
-- 프로젝트 백업 위치
-- 검증 결과
-
-필수 안전장치:
-
-- 원본 템플릿 프로젝트 직접 수정 금지
-- 임시 디렉터리에서 생성 후 원자적 rename
-- 참조 무결성 검사
-- 삽입 전/후 manifest
-- 재실행 시 중복 트랙 방지
-- 승인되지 않은 후보 삽입 금지
-
-현재 추천 문구를 텍스트 트랙으로 넣는 동작은 `MANUAL_REQUIRED` 폴백으로 계속 사용할 수 있다.
-
-## 9. 후보 비교와 사람 검수
-
-검수는 두 층으로 나눈다.
-
-### 결정론적 검사
-
-- 파일 열기 가능, 크기/비율/길이
-- 검은 프레임/빈 이미지/손상
-- 워터마크 또는 정책상 금지 메타데이터
-- 중복 이미지 perceptual hash
-- 안전 영역 위반
-- 생성 요청과 artifact provenance 연결
-
-### 의미 기반 평가
-
-- 대사/컷 의도와의 적합도
-- 채널 스타일 적합도
-- 인물/브랜드/제품 왜곡
-- 텍스트 렌더링 오류
-- 사실 전달 컷에서의 오해 가능성
-
-LLM/비전 평가 점수는 자동 승인 근거가 아니라 정렬 신호로 우선 사용한다. 사람 UI는 후보 나란히 보기, 원본/후처리 비교, 재생성, 프롬프트 수정, 로컬 파일 교체, crop 수정, 승인/거절 사유를 제공한다.
-
-선택 기록은 다음 추천에 쓰기 위해 `SelectionEvent`로 보존한다.
-
-```text
-channel_id, project_id, cut_id
-candidates 요약, selected_id
-action(approve/replace/reject/regenerate)
-reason_tags, free_note
-classifier_version, reviewer, timestamp
-```
-
-초기에는 이를 곧바로 모델 학습에 쓰지 말고 규칙/프롬프트 평가 데이터로 축적한다.
-
-## 10. 작업 그래프와 역할별 에이전트
-
-권장 DAG:
+**[제안]** 처음부터 자유롭게 다음 행동을 정하는 자율 에이전트를 두지 않는다. 저장된 입력·출력 계약을 가진 결정론적 DAG를 우선한다.
 
 ```text
 topic_select
@@ -290,83 +264,78 @@ topic_select
 → final_validation
 ```
 
-각 노드는 다음 계약을 가진다.
+각 노드는 입력·출력 스키마, side effect 여부, 모델 capability, timeout·retry·budget, cache·idempotency, 사람 개입 조건, 실패 대안을 가진다. 로컬 Qwen과 상용 모델 선택은 작업 성격과 capability 정책으로 결정하고, 그래프의 순서는 일반 코드가 통제한다.
 
-- 명시적 입력/출력 스키마
-- side effect 여부
-- 선택할 model capability
-- timeout/retry/budget
-- cache/idempotency
-- 사람이 개입할 조건
-- 실패 시 폴백
+## 10. 권장안과 차선책
 
-“에이전트 역할”은 처음에는 노드별 프롬프트/도구 정책의 이름이다. 에이전트끼리 자유 대화하거나 임의로 다음 단계를 만드는 구조는 나중 문제다. 그래프 실행기가 순서, 예산, 승인, 재시도를 통제한다.
+| 안 | 장점 | 단점 | 판단 |
+|---|---|---|---|
+| 버전 있는 manifest + 영속 상태 머신 + 공급자 포트 | 재시작 복구, 중복 과금 방지, 공급자 교체, 사람 검수에 적합 | 초기 모델·테스트 설계가 필요 | **권장** |
+| `guide.json` 확장 + 로컬 JSON 상태 + 동기 공급자 한 개 | 빠르게 시제품 가능, 새 DB 없음 | 스키마 결합, 동시성·복구·비용 관리가 약함 | 제한된 PoC 차선책 |
+| 기존 `service.py`에 생성 API를 직접 추가 | 파일 수가 적음 | 대형 함수 결합과 팀판 의존성 누출을 악화 | 비권장 |
 
-모델 라우팅 예:
+현재 저장소에는 DB가 없으므로 SQLite 도입도 첫 manifest 계약이 안정된 뒤 진행한다. 공급자 API를 먼저 붙이는 순서는 권장하지 않는다.
 
-| 작업 | 우선 모델 성격 | 폴백 |
-|---|---|---|
-| 간단 분류/정규화 | 로컬 Qwen 저비용 | 상용 소형 |
-| 채널 비전 분석 | 비전 지원 로컬/상용 | 수동 검토 |
-| 사실 조사 요약 | 검색 근거를 다루는 상용 모델 | 규칙 기반 원문 묶음 |
-| 고품질 대본 | 상용 고성능 | 다른 상용 공급자 |
-| 이미지 후보 평가 | 비전 모델 | 사람 정렬 |
-| 이미지/영상 생성 | capability/가격 기반 | 다른 공급자 또는 manual |
+## 11. 단계별 개인판 확장
 
-## 11. 단계별 개인 확장 로드맵
-
-### 1단계: Manifest와 수동 검토
+### 단계 A: Manifest와 수동 검토
 
 - 기존 `guide`를 `CutManifest`로 변환한다.
-- AssetType 규칙 분류와 UI 수정을 제공한다.
-- 로컬 자산을 컷에 연결하고 승인 상태를 저장한다.
+- 규칙 기반 `AssetType` 기본값과 사용자 수정 UI를 제공한다.
+- 로컬 수동 에셋을 컷에 연결하고 승인 상태를 저장한다.
 - 외부 생성 API는 호출하지 않는다.
 
-완료 조건: 한 프로젝트의 모든 컷이 명시적 상태와 선택 자산을 가지고, 재시작 후 복원된다.
+완료 조건: 재실행 후 모든 컷 ID, 선택 파일, 승인 상태가 복원되고 기존 `guide.json`과 현 CapCut 출력은 변하지 않는다.
 
-### 2단계: 이미지 생성 한 공급자
+### 단계 B: 이미지 공급자 한 개
 
-- `ImageGenerationProvider` fake와 실제 어댑터 하나.
-- 큐, idempotency, 비용, 다운로드, 후처리, 후보 비교.
-- 승인 후에만 CapCut에 삽입.
+- fake 공급자로 계약 테스트를 먼저 만든다.
+- 실제 이미지 공급자 하나, 작업 상태·idempotency·비용 기록·후처리를 연결한다.
+- 승인된 결과만 CapCut 삽입기에 전달한다.
 
-완료 조건: 실패/재시작/중복 클릭에도 중복 과금과 중복 삽입이 없다.
+완료 조건: 실패·재시작·재시도에도 중복 과금과 중복 삽입이 없다.
 
-### 3단계: 공급자 라우팅과 영상
+### 단계 C: 다중 이미지 공급자와 영상
 
-- Google/OpenAI 등 두 번째 이미지 공급자.
-- 영상 provider 인터페이스와 polling.
-- capability/비용/폴백 정책.
+- capability·비용 정책으로 공급자를 선택한다.
+- 영상 polling·취소·다운로드를 추가한다.
+- 공급자별 장애 폴백은 명시적 정책으로만 수행한다.
 
-### 4단계: 작업 그래프
+### 단계 D: 작업 그래프
 
-- 조사부터 최종 검수까지 노드화.
-- 사람 승인 게이트, 프로젝트 예산, 재실행.
-- 기존 `service.py` 흐름은 호환 그래프 또는 legacy 경로로 유지.
+- 조사부터 최종 검수까지 저장 가능한 노드로 연결한다.
+- 사람 승인, 예산, 재시도를 그래프 실행기가 통제한다.
+- 기존 `service.py` 흐름은 호환 경로로 유지한다.
 
-### 5단계: 선택 기록 활용
+### 단계 E: 선택 기록 활용
 
-- 채널별 선택 이벤트 분석.
-- 규칙/프롬프트 추천 개선.
-- 충분한 데이터와 평가셋이 생긴 뒤에만 학습/랭킹 모델 검토.
+- 채널별 `SelectionEvent`를 분석한다.
+- 규칙·프롬프트·후보 정렬을 개선한다.
+- 충분한 표본과 오프라인 평가 전에는 자동 학습·배포하지 않는다.
 
-## 12. 당장 피해야 할 설계
+## 12. 확정 사항과 남은 결정
 
-- 생성 공급자 응답 dict를 그대로 `guide.json`에 저장
-- CapCut 삽입과 생성 API 호출을 하나의 함수로 묶기
-- 실패할 때마다 job ID를 버리고 무조건 재생성
-- LLM이 비용/재시도/승인 여부를 자유롭게 결정
-- 승인 전 원본 CapCut 프로젝트를 수정
-- 파일 경로만 저장하고 checksum/provenance를 저장하지 않기
-- 팀판 core가 개인용 공급자 SDK를 import하도록 만들기
+확정:
 
-## 13. 추가 결정 사항
+- `CutManifest` 계약은 공통 코어에 두고 팀판은 인터페이스만 포함한다.
+- 개인판 데이터는 팀판과 분리하고 선택 기록은 영구 보존한다.
+- 모든 유료 생성 전에 승인하며 생성 실패는 `MANUAL_REQUIRED`로 전환한다.
+- 초기 작업 그래프는 자유 행동형 에이전트가 아니라 결정론적 DAG다.
+- 로컬 Qwen 최종 검수는 읽기 전용이다.
 
-- 개인 작업 상태 저장소를 SQLite로 시작할지
-- 원본 생성 에셋의 보존 기간과 저장 한도
-- 첫 이미지/영상 공급자와 예산
-- 채널별 저작권·인물·브랜드 정책
-- 자동 승인 허용 범위
-- CapCut 삽입 후 되돌리기 UX
-- 작업 그래프의 동시 생성 개수와 GPU/API 자원 우선순위
+남은 결정:
 
+1. 세그먼트와 실제 편집 컷의 관계 및 컷 분할 기준
+2. 개인 작업 상태의 SQLite 대 프로젝트별 JSON
+3. 생성 model alias/snapshot과 가격표 유효일
+4. 원본·후보·선택 기록의 backup·export·삭제 방식
+5. 지원할 CapCut 버전과 익명 template
+6. 외부 모델로 전송 가능한 데이터 범위
+
+## 13. 요약
+
+- 가장 먼저 할 일은 공급자 연결이 아니라 `guide → CutManifest` 계약과 golden fixture를 만드는 것이다.
+- 지금 건드리면 위험한 부분은 `shortly/generate/capcut_export.py`의 템플릿 복제, ID 재생성, TTS 타이밍, 루트 등록 로직이다.
+- 개인 자동화판의 첫 구현은 규칙 기반 분류와 수동 검토·교체까지이며 외부 이미지·영상 생성 호출은 포함하지 않는다.
+- 주요 기술 부채는 단일 `service.py`, 무스키마 dict, 인메모리 웹 작업, CapCut 비공식 스키마, 공급자별 오류·비용 계약 부재다.
+- 익명화된 실제 CapCut 프로젝트와 채널별 컷 분할 사례 없이는 삽입기 계약을 확정할 수 없다.

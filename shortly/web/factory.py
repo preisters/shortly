@@ -26,6 +26,12 @@ _FRAMEWORK_ROUTES = {
     "/redoc",
 }
 
+_PRODUCT_EXCLUDED_ROUTES = {
+    ProductKind.TEAM: {"/api/local-models"},
+    ProductKind.PERSONAL: set(),
+    ProductKind.LEGACY: set(),
+}
+
 
 def route_manifest(app: FastAPI) -> tuple[tuple[str, str], ...]:
     rows = []
@@ -61,6 +67,8 @@ def create_product_app(
         route
         for route in legacy_app.app.router.routes
         if getattr(route, "path", None) not in _FRAMEWORK_ROUTES
+        and getattr(route, "path", None)
+        not in _PRODUCT_EXCLUDED_ROUTES[product]
     )
     app.state.shortly_composition = composition
     app.state.product = product.value

@@ -183,17 +183,17 @@ moderation·예산 초과는 재시도하지 않고 사람에게 돌려보낸다
 | portable ZIP | 부분 가능; 폴더 build 뒤 ZIP manifest | `portable/build.py`, packaging | installer는 유지하되 초기 릴리스에 미사용 | 중간 | 서명·전달 채널 미정 |
 | 자동 업데이트 없음 | 바로 가능; 기능 추가 안 함 | 없음 | 영향 없음 | 낮음 | 수동 업데이트 안내 필요 |
 | 팀 기존 portable 기능 유지 | 가능; 계약 테스트 선행 | `service.py`, `web/*` | 현 route·JSON·UI 보존 | 중간 | E2E 기준 시나리오 필요 |
-| 팀 artifact에서 local 제외 | 현재 불가; registry·route·정적 UI·allowlist 분리 | `llm/*`, `web/*`, `portable/*` | team만 local 선택 불가, personal은 보존 | 높음 | source 누출·import 파손 |
+| 팀 artifact에서 local 제외 | 구현됨; registry·route·정적 UI·source allowlist 분리 | `llm/*`, `apps/*`, `web/*`, `portable/*` | team만 local 선택 불가, personal·legacy는 보존 | 높음 | Windows 실기기 artifact smoke 필요 |
 | 현 Anthropic·Typecast 설정 유지 | 가능; 저장·검사 동작 유지 | `config.py`, `web/app.py` | 사용자 입력 흐름 동일 | 낮음 | 평문 key 권한·backup 검사 |
 | Documents에 artifact·로그 | 현재 불일치; Known Folder `PathPolicy` | `config.py`, launcher | 기존 TTS/log 위치 migration 필요 | 중간 | temp 위치·보존 기간 미정 |
 | CapCut 자동 탐색 후 직접 지정 | 부분 가능; override 설정·UI 연결 | `capcut_export.py`, `web/*` | 자동 탐색 우선순위 유지 | 중간 | 지원 CapCut 버전 미정 |
 | 일반 오류와 상세 로그 분리 | 현재 미흡; 오류 코드·redaction 정책 | `web/app.py`, adapters | 사용자 메시지는 단순화 | 중간 | prompt·경로 개인정보와 log 보존 |
-| personal 별도 엔트리포인트 | 현재 없음; app composition root | 신규 `apps/*` | legacy entrypoint 유지 | 중간 | 잘못된 registry 조합 방지 |
-| personal UI만 별도 포함 | 현재 불가; 정적 module·allowlist | `web/static/*` | 공통 화면 동작 보존 | 높음 | 팀 ZIP에 personal asset 누출 |
+| personal 별도 엔트리포인트 | 구현됨; app composition root | `apps/personal/*` | legacy entrypoint 유지 | 중간 | 실행 파일 패키징 smoke 필요 |
+| personal UI만 별도 포함 | local 설정 영역까지 적용; product-aware 렌더링·artifact 정제 | `web/static/*`, `web/assets.py` | 공통 화면 동작 보존 | 중간 | 후속 개인 자동화 UI도 같은 경계 사용 |
 | Qwen 읽기 전용 최종 검수 | 현재 없음; `ReviewReport`, mutation port 미주입 | personal 신규 모듈 | 기존 생성물 수정 없음 | 중간 | model ID·vision capability 미정 |
 | 생성 전 유료 승인 | 현재 없음; quote·approval·job 상태 | personal 신규 모듈 | 기존 추천 흐름은 유지 | 높음 | 중복 과금·승인 replay 방지 |
 | 비용·사용량 기록 | 현재 없음; `UsageRecord` 영속 저장 | personal 신규 모듈 | 팀에는 영향 없음 | 높음 | 가격표 유효일·환율 정책 필요 |
-| team/personal 데이터 분리 | 현재 없음; product별 app ID·root | `config.py`, launcher | legacy 데이터 자동 이동 금지 | 중간 | migration·backup 정책 필요 |
+| team/personal 데이터 분리 | 기본 root 분리 구현; 자동 migration 없음 | `config.py`, `path_policy.py`, launcher | legacy 데이터 자동 이동 금지 | 중간 | migration·backup 정책 필요 |
 | 영구 선택 기록 | 현재 없음; export·delete 포함 저장소 | personal 신규 모듈 | 기존 결과물에 영향 없음 | 중간 | 보존은 확정, 삭제·backup은 미정 |
 
 ## 4. 확정 제품 구성

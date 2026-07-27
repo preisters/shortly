@@ -52,6 +52,10 @@ python -m shortly.apps.personal.launcher
 # 팀판은 portable 패키지의 기존 시작 파일이 team composition root를 사용
 ```
 
+팀판의 LLM 레지스트리는 현재 Anthropic만 등록합니다. 개인판과 legacy 실행은
+Gemini, OpenAI, Anthropic 및 OpenAI-compatible 로컬 서버 연결을 유지합니다.
+팀 포터블 빌드는 개인판 앱과 로컬 LLM 어댑터를 산출물에서 제외합니다.
+
 ### 로컬 모델 사용 (Ollama / LM Studio)
 
 `provider=local` 로 OpenAI 호환 로컬 서버에 붙습니다. `pip install openai` 가 필요합니다.

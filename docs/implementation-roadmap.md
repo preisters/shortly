@@ -159,12 +159,24 @@ PathPolicy
 - 동일 core service를 주입받는 app factory 도입
 - route manifest golden 작성
 
+구현 상태(2026-07-27): 제품별 앱 팩터리·런처와 요청 단위 서비스 주입 경계를
+구현했다. personal은 legacy 24개 route를 유지하고, team은 다음 단계에서 금지된
+route를 제외할 수 있는 별도 앱 객체를 사용한다. 기존 `python -m shortly web`은
+호환 경로로 유지한다.
+
 ### PR 3: local provider 경계
 
 - local OpenAI-compatible adapter와 model discovery를 personal registry로 이동
 - 팀 API와 정적 UI에서 local 기능을 제거
 - 팀 source allowlist 테스트
 - OpenAI 상용 adapter와 local adapter의 공통 부분만 transport 수준에서 공유
+
+구현 상태(2026-07-27): team registry는 Anthropic만 등록하고 personal/legacy
+registry는 기존 상용 provider와 local 별칭을 유지하도록 분리했다. team 앱은
+`/api/local-models`를 등록하지 않고 local 설정 HTML을 렌더링하지 않는다. 포터블
+빌드는 personal 앱, Gemini/OpenAI adapter와 공통 OpenAI transport를 제외하며,
+생성된 HTML/JavaScript에서도 local 탐색 UI를 제거한다. 산출물 import smoke와
+source allowlist 검사를 회귀 테스트에 포함했다.
 
 ### PR 4: SFX 경계
 

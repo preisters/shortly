@@ -18,7 +18,7 @@ from ..config import (
     PORTABLE_GENERATION_MODEL,
     PROJECT_ROOT,
 )
-from .build import _copy_tree, _write_requirements
+from .build import _copy_team_package, _write_requirements
 from .runtime import setup_embedded_python, setup_ffmpeg, verify_runtime
 
 Progress = Callable[[str, Optional[int], Optional[int]], None]
@@ -242,7 +242,7 @@ def build_installer(
     out.mkdir(parents=True, exist_ok=True)
 
     progress("앱 소스 복사 중...", None, None)
-    n = _copy_tree(PROJECT_ROOT / "shortly", out / "shortly", PROJECT_ROOT)
+    n = _copy_team_package(out)
     for name in ("pyproject.toml",):
         src = PROJECT_ROOT / name
         if src.is_file():

@@ -17,6 +17,8 @@ from ..config import (
     PORTABLE_GENERATION_MODEL,
     PROJECT_ROOT,
 )
+from ..product_profile import ProductKind
+from ..web.assets import render_index, render_script
 
 Progress = Callable[[str, Optional[int], Optional[int]], None]
 
@@ -29,6 +31,12 @@ _SKIP_FILE_SUFFIXES = {".pyc", ".pyo", ".pyd"}
 _SKIP_FILE_NAMES = {
     ".env",  # 개발자 키 유출 방지 — 포터블용 .env 를 새로 씀
 }
+_TEAM_SOURCE_EXCLUDES = (
+    Path("shortly/apps/personal"),
+    Path("shortly/llm/gemini.py"),
+    Path("shortly/llm/openai_client.py"),
+    Path("shortly/llm/openai_transport.py"),
+)
 
 
 def _noop(msg: str, cur: Optional[int] = None, total: Optional[int] = None) -> None:
@@ -50,9 +58,29 @@ def _should_skip(path: Path, root: Path) -> bool:
     return False
 
 
-def _copy_tree(src: Path, dst: Path, root: Path) -> int:
+def _is_explicitly_excluded(
+    path: Path,
+    root: Path,
+    excludes: tuple[Path, ...],
+) -> bool:
+    relative = path.relative_to(root)
+    return any(
+        relative == excluded or excluded in relative.parents
+        for excluded in excludes
+    )
+
+
+def _copy_tree(
+    src: Path,
+    dst: Path,
+    root: Path,
+    *,
+    excludes: tuple[Path, ...] = (),
+) -> int:
     """src 트리를 dst 로 복사. 스킵 규칙 적용. 복사한 파일 수 반환."""
     count = 0
+    if _is_explicitly_excluded(src, root, excludes):
+        return 0
     if src.is_file():
         if _should_skip(src, root):
             return 0
@@ -64,13 +92,45 @@ def _copy_tree(src: Path, dst: Path, root: Path) -> int:
             continue
         if _should_skip(child, root):
             continue
+        if _is_explicitly_excluded(child, root, excludes):
+            continue
         target = dst / child.name
         if child.is_dir():
-            count += _copy_tree(child, target, root)
+            count += _copy_tree(
+                child,
+                target,
+                root,
+                excludes=excludes,
+            )
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(child, target)
             count += 1
+    return count
+
+
+def _copy_team_package(out_dir: Path) -> int:
+    """Copy the team source allowlist and materialize its sanitized HTML."""
+
+    package_root = out_dir / "shortly"
+    count = _copy_tree(
+        PROJECT_ROOT / "shortly",
+        package_root,
+        PROJECT_ROOT,
+        excludes=_TEAM_SOURCE_EXCLUDES,
+    )
+    source_index = PROJECT_ROOT / "shortly" / "web" / "static" / "index.html"
+    target_index = package_root / "web" / "static" / "index.html"
+    target_index.write_text(
+        render_index(source_index, ProductKind.TEAM),
+        encoding="utf-8",
+    )
+    source_script = PROJECT_ROOT / "shortly" / "web" / "static" / "app.js"
+    target_script = package_root / "web" / "static" / "app.js"
+    target_script.write_text(
+        render_script(source_script, ProductKind.TEAM),
+        encoding="utf-8",
+    )
     return count
 
 
@@ -146,7 +206,7 @@ echo shortly 포터블 실행 중...
 echo 브라우저에서 http://127.0.0.1:8756 을 열어주세요.
 echo 종료하려면 이 창에서 Ctrl+C 를 누르세요.
 echo.
-".venv\Scripts\python.exe" -m shortly web --host 127.0.0.1 --port 8756
+".venv\Scripts\python.exe" -m shortly.apps.team.launcher
 pause
 """
     (out_dir / "실행.bat").write_text(bat, encoding="utf-8")
@@ -235,9 +295,9 @@ def build_portable(
 
     progress("소스 복사 중...", None, None)
     # 패키지
-    n = _copy_tree(PROJECT_ROOT / "shortly", out / "shortly", PROJECT_ROOT)
+    n = _copy_team_package(out)
     # 메타
-    for name in ("pyproject.toml", "README.md"):
+    for name in ("pyproject.toml",):
         src = PROJECT_ROOT / name
         if src.is_file():
             shutil.copy2(src, out / name)

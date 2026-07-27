@@ -136,6 +136,7 @@ async function loadSettings() {
   } catch (e) { /* 상태바에서 이미 표시 */ }
 }
 
+/* shortly:local-script:start */
 function updateProviderUI(s) {
   s = s || _lastSettings;
   const prov = $("set-provider").value;
@@ -193,6 +194,7 @@ async function loadLocalModels() {
     $("settings-msg").textContent = "모델 목록 실패: " + e.message;
   }
 }
+/* shortly:local-script:end */
 
 // 생성 전용 모델 섹션 UI 토글
 function updateGenUI(s) {
@@ -215,11 +217,22 @@ function updateGenUI(s) {
   }
 }
 
-$("set-gen-provider").onchange = () => updateGenUI();
-
-$("set-provider").onchange = () => updateProviderUI();
-$("btn-reload-models").onclick = loadLocalModels;
-$("set-baseurl").onchange = () => { if ($("set-provider").value === "local") loadLocalModels(); };
+if ($("set-gen-provider")) {
+  $("set-gen-provider").onchange = () => updateGenUI();
+}
+/* shortly:local-script:start */
+if ($("set-provider")) {
+  $("set-provider").onchange = () => updateProviderUI();
+}
+if ($("btn-reload-models")) {
+  $("btn-reload-models").onclick = loadLocalModels;
+}
+if ($("set-baseurl")) {
+  $("set-baseurl").onchange = () => {
+    if ($("set-provider") && $("set-provider").value === "local") loadLocalModels();
+  };
+}
+/* shortly:local-script:end */
 
 $("btn-save-settings").onclick = async () => {
   const btn = $("btn-save-settings");

@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from ..config import get_settings, save_settings
 from .. import service as default_service
 from ..llm import get_llm
+from .assets import render_index
 from .composition import ServiceProxy
 
 service = ServiceProxy(default_service)
@@ -177,7 +178,7 @@ def index() -> HTMLResponse:
     html_path = STATIC_DIR / "index.html"
     if not html_path.is_file():
         return HTMLResponse("<h1>shortly</h1><p>static/index.html 이 없습니다.</p>")
-    html = html_path.read_text(encoding="utf-8")
+    html = render_index(html_path, get_settings().product)
 
     def _ver(name: str) -> int:
         p = STATIC_DIR / name
@@ -229,11 +230,10 @@ def api_get_settings() -> dict:
     s = get_settings()
     llm = get_llm(s)
     gen_llm = get_llm(s, role="generation")
-    return {
+    response = {
         "provider": s.llm_provider,
         "text_model": s.text_model,
         "vision_model": s.vision_model,
-        "local_base_url": s.local_base_url,
         "llm_available": llm.available,
         # 생성 전용 모델(비어 있으면 분석 모델과 동일)
         "gen_provider": s.gen_provider,
@@ -256,31 +256,21 @@ def api_get_settings() -> dict:
             "typecast": bool(s.typecast_api_key),
         },
     }
+    if s.features.local_llm:
+        response["local_base_url"] = s.local_base_url
+    return response
 
 
 @app.get("/api/local-models")
 def api_local_models(base_url: Optional[str] = Query(None)) -> dict:
     """로컬 OpenAI 호환 서버(LM Studio/Ollama)에 설치·로드된 모델 목록."""
-    import urllib.request
+    from ..apps.personal.local_models import discover_local_models
 
     s = get_settings()
-    url = (base_url or s.local_base_url or "").strip().rstrip("/")
-    if not url:
-        return {"models": [], "error": "로컬 서버 주소가 설정되지 않았습니다."}
-    models_url = url + "/models"
-    key = s.local_api_key or "not-needed"
-    request = urllib.request.Request(
-        models_url, headers={"Authorization": f"Bearer {key}"})
-    try:
-        with urllib.request.urlopen(request, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        ids = [m.get("id") for m in data.get("data", []) if m.get("id")]
-        # 임베딩 전용 모델은 텍스트/비전 생성에 쓸 수 없으므로 뒤로 미룸
-        gen = [m for m in ids if "embed" not in m.lower()]
-        emb = [m for m in ids if "embed" in m.lower()]
-        return {"models": gen + emb, "base_url": url}
-    except Exception as exc:  # noqa: BLE001
-        return {"models": [], "error": f"모델 목록 조회 실패: {exc}"}
+    return discover_local_models(
+        base_url or s.local_base_url,
+        s.local_api_key,
+    )
 
 
 @app.post("/api/settings")

@@ -57,10 +57,32 @@ class AppCompositionTests(unittest.TestCase):
         self.assertEqual(personal.state.product, ProductKind.PERSONAL.value)
         self.assertFalse(team.state.features.local_llm)
         self.assertTrue(personal.state.features.local_llm)
-        self.assertEqual(route_manifest(team), route_manifest(legacy_app.app))
         self.assertEqual(route_manifest(personal), route_manifest(legacy_app.app))
-        self.assertEqual(len(team.routes), 24)
+        self.assertNotIn(("GET", "/api/local-models"), route_manifest(team))
+        self.assertIn(("GET", "/api/local-models"), route_manifest(personal))
+        self.assertEqual(len(team.routes), 23)
         self.assertEqual(len(personal.routes), 24)
+
+    def test_team_http_surface_hides_local_provider_features(self) -> None:
+        with isolated_shortly_env():
+            app = create_team_app()
+            team_settings = Settings.load()
+            team_settings.lan_only = False
+            with patch.object(
+                legacy_app,
+                "get_settings",
+                return_value=team_settings,
+            ):
+                with TestClient(app) as client:
+                    index_response = client.get("/")
+                    local_response = client.get("/api/local-models")
+                    settings_response = client.get("/api/settings")
+
+        self.assertEqual(index_response.status_code, 200)
+        self.assertNotIn('value="local"', index_response.text)
+        self.assertNotIn("Ollama", index_response.text)
+        self.assertEqual(local_response.status_code, 404)
+        self.assertNotIn("local_base_url", settings_response.json())
 
     def test_request_scope_selects_injected_service(self) -> None:
         fake = _FakeService()

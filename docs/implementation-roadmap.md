@@ -11,6 +11,8 @@
 > CapCut prepare/commit 기준선까지 구현했다. 상세 결과와 남은 수동 검증은
 > [`personal-automation-implementation-report.md`](personal-automation-implementation-report.md)를
 > 기준으로 한다. 포터블 완성도 개선은 사용자 결정에 따라 후순위다.
+> 실제 OpenAI·Google·Anthropic 및 CapCut 정적 smoke 결과는
+> [`provider-capcut-smoke-report.md`](provider-capcut-smoke-report.md)를 참조한다.
 
 ## 1. 구현 원칙
 

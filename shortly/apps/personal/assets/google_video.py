@@ -71,6 +71,11 @@ class GoogleVideoProvider:
 
     def submit(self, request: VideoGenerationRequest) -> VideoSubmission:
         client = self._get_client()
+        interactions = getattr(client, "interactions", None)
+        if interactions is None or not hasattr(interactions, "create"):
+            raise ProviderUnavailableError(
+                "Installed Google Gen AI SDK does not provide the Interactions API."
+            )
         input_value: Any = request.prompt
         if request.source_image is not None:
             input_value = [
@@ -82,7 +87,7 @@ class GoogleVideoProvider:
                 },
             ]
         try:
-            response = client.interactions.create(
+            response = interactions.create(
                 model=request.model,
                 input=input_value,
                 response_format={

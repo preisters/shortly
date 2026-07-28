@@ -114,6 +114,98 @@ def load_prepared_export(path: Path) -> PreparedExport:
     )
 
 
+def validate_capcut_project(
+    project_dir: Path,
+    *,
+    expected_asset_count: Optional[int] = None,
+) -> dict[str, Any]:
+    """Validate a committed project without opening or modifying CapCut."""
+
+    project = Path(project_dir)
+    content_path = project / "draft_content.json"
+    errors: list[str] = []
+    warnings: list[str] = []
+    try:
+        document = json.loads(content_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        return {
+            "passed": False,
+            "errors": [f"draft_content.json could not be read: {type(exc).__name__}"],
+            "warnings": [],
+            "inserted_assets": [],
+        }
+
+    canvas = document.get("canvas_config") or {}
+    if str(canvas.get("ratio") or "") != "9:16":
+        errors.append("canvas ratio is not 9:16")
+    if int(document.get("duration") or 0) <= 0:
+        errors.append("project duration is missing or invalid")
+
+    materials = document.get("materials") or {}
+    material_index = {
+        item.get("id"): item
+        for values in materials.values()
+        if isinstance(values, list)
+        for item in values
+        if isinstance(item, dict) and item.get("id")
+    }
+    referenced_ids: list[str] = []
+    for track in document.get("tracks") or []:
+        if not isinstance(track, dict):
+            continue
+        for segment in track.get("segments") or []:
+            if isinstance(segment, dict) and segment.get("material_id"):
+                referenced_ids.append(str(segment["material_id"]))
+    missing_refs = sorted(
+        {material_id for material_id in referenced_ids if material_id not in material_index}
+    )
+    if missing_refs:
+        errors.append(f"{len(missing_refs)} material references do not resolve")
+
+    inserted_assets: list[dict[str, Any]] = []
+    for material in material_index.values():
+        raw_path = str(material.get("path") or "")
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if path.parent.name != "shortly_cuts" or not path.name.startswith("cut_"):
+            continue
+        exists = path.is_file()
+        if not exists:
+            errors.append(f"inserted asset is missing: {path.name}")
+        media_type = str(material.get("type") or "")
+        if media_type not in ("photo", "video"):
+            warnings.append(
+                f"inserted asset has unexpected material type: {media_type or 'empty'}"
+            )
+        inserted_assets.append(
+            {
+                "name": path.name,
+                "type": media_type,
+                "exists": exists,
+                "width": material.get("width"),
+                "height": material.get("height"),
+                "duration": material.get("duration"),
+            }
+        )
+    if (
+        expected_asset_count is not None
+        and len(inserted_assets) != expected_asset_count
+    ):
+        errors.append(
+            "inserted asset count mismatch: "
+            f"expected {expected_asset_count}, got {len(inserted_assets)}"
+        )
+    return {
+        "passed": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "inserted_assets": inserted_assets,
+        "material_references": len(referenced_ids),
+        "track_count": len(document.get("tracks") or []),
+    }
+
+
 def commit_export(prepared: PreparedExport) -> dict[str, Any]:
     """Perform the existing export only after the immutable plan validates."""
 
@@ -129,4 +221,15 @@ def commit_export(prepared: PreparedExport) -> dict[str, Any]:
     )
     result["prepared_export_id"] = prepared.id
     result["selected_assets"] = len(prepared.cut_assets)
+    if result.get("ok") and result.get("path"):
+        validation = validate_capcut_project(
+            Path(result["path"]),
+            expected_asset_count=len(prepared.cut_assets),
+        )
+        result["validation"] = validation
+        if not validation["passed"]:
+            result["ok"] = False
+            result["reason"] = (
+                "CapCut project was created but post-commit validation failed."
+            )
     return result

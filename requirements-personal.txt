@@ -1,4 +1,4 @@
 # Optional dependencies used only by the personal automation composition.
 # Install after the base requirements:
 #   python -m pip install -r requirements.txt -r requirements-personal.txt
-google-genai>=1.0.0
+google-genai>=2.14.0,<3.0.0

@@ -5,7 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from shortly.apps.personal.automation.capcut_assets import prepare_export
+from shortly.apps.personal.automation.capcut_assets import (
+    prepare_export,
+    validate_capcut_project,
+)
 from shortly.apps.personal.automation.review import (
     qwen_read_only_review,
     technical_review,
@@ -124,6 +127,71 @@ class PersonalReviewAndExportTests(unittest.TestCase):
         self.assertEqual(material["type"], "video")
         self.assertEqual(material["duration"], 1_000_000)
         self.assertEqual(segment["source_timerange"]["duration"], 1_000_000)
+
+    def test_committed_capcut_project_validation_resolves_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            cuts = project / "shortly_cuts"
+            cuts.mkdir()
+            asset = cuts / "cut_01.jpg"
+            asset.write_bytes(b"fixture")
+            document = {
+                "duration": 1_000_000,
+                "canvas_config": {"ratio": "9:16"},
+                "materials": {
+                    "videos": [
+                        {
+                            "id": "material",
+                            "type": "photo",
+                            "path": str(asset),
+                            "width": 1080,
+                            "height": 1920,
+                        }
+                    ]
+                },
+                "tracks": [
+                    {
+                        "type": "video",
+                        "segments": [{"material_id": "material"}],
+                    }
+                ],
+            }
+            (project / "draft_content.json").write_text(
+                __import__("json").dumps(document),
+                encoding="utf-8",
+            )
+
+            result = validate_capcut_project(
+                project, expected_asset_count=1
+            )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["inserted_assets"][0]["type"], "photo")
+
+    def test_committed_capcut_project_validation_reports_missing_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            (project / "draft_content.json").write_text(
+                __import__("json").dumps(
+                    {
+                        "duration": 1,
+                        "canvas_config": {"ratio": "9:16"},
+                        "materials": {},
+                        "tracks": [
+                            {
+                                "segments": [
+                                    {"material_id": "missing-material"}
+                                ]
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = validate_capcut_project(project)
+
+        self.assertFalse(result["passed"])
+        self.assertIn("material references", result["errors"][0])
 
 
 if __name__ == "__main__":

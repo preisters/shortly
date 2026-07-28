@@ -368,12 +368,14 @@ def create_router(
     @router.post("/api/personal/exports/prepare")
     def prepare(body: PrepareExportRequest) -> dict:
         try:
+            base = get_settings()
             return prepare_export(
                 store=store,
                 manifest_id=body.manifest_id,
                 guide=body.guide,
                 staging_root=settings.assets_dir,
                 capcut_root=body.capcut_root,
+                template_name=base.capcut_template,
             ).to_dict()
         except Exception as exc:
             raise _error(exc) from exc
@@ -385,7 +387,12 @@ def create_router(
             allowed = settings.assets_dir.resolve()
             if allowed not in plan.parents:
                 raise ValueError("Prepared export must be inside the asset directory.")
-            return commit_export(load_prepared_export(plan))
+            base = get_settings()
+            return commit_export(
+                load_prepared_export(plan),
+                tts_cfg=base.typecast_config(),
+                tts_out_dir=str(base.tts_output_dir),
+            )
         except Exception as exc:
             raise _error(exc) from exc
 

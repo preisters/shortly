@@ -10,8 +10,9 @@ from uuid import uuid4
 
 from ....core.domain.assets import AssetType
 from ....generate.capcut_export import (
+    _find_template_project,
     _pick_templates,
-    export_to_capcut_project,
+    export_via_template,
     find_capcut_draft_root,
 )
 from .store import AutomationStore
@@ -25,6 +26,7 @@ class PreparedExport:
     guide: dict[str, Any]
     cut_assets: dict[str, dict[str, str]]
     plan_path: str
+    template_name: str = "챙맛 템플릿"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -34,6 +36,7 @@ class PreparedExport:
             "guide": self.guide,
             "cut_assets": self.cut_assets,
             "plan_path": self.plan_path,
+            "template_name": self.template_name,
         }
 
 
@@ -44,6 +47,7 @@ def prepare_export(
     guide: Mapping[str, Any],
     staging_root: Path,
     capcut_root: Optional[str] = None,
+    template_name: str = "챙맛 템플릿",
 ) -> PreparedExport:
     """Validate everything without changing a CapCut project."""
 
@@ -53,7 +57,12 @@ def prepare_export(
         raise ValueError(
             "CapCut project folder was not found. Start CapCut once or set it manually."
         )
+    template = _find_template_project(root, template_name)
     base, text_template, image_template = _pick_templates(root)
+    if template is None:
+        raise ValueError(
+            f"CapCut template project was not found: {template_name}"
+        )
     if base is None or text_template is None or image_template is None:
         raise ValueError(
             "A compatible CapCut project containing text and image/video clips is required."
@@ -70,7 +79,15 @@ def prepare_export(
             if requires_selected:
                 missing.append(cut.id)
             continue
-        path = Path(candidate.prepared_path or candidate.original_path or "")
+        original = Path(candidate.original_path or "")
+        prepared_path = Path(candidate.prepared_path or "")
+        path = (
+            original
+            if candidate.media_kind.value == "image" and original.is_file()
+            else prepared_path
+            if prepared_path.is_file()
+            else original
+        )
         if not path.is_file():
             missing.append(cut.id)
             continue
@@ -94,6 +111,7 @@ def prepare_export(
         guide=dict(guide),
         cut_assets=selected,
         plan_path=str(plan_path),
+        template_name=template_name,
     )
     plan_path.write_text(
         json.dumps(prepared.to_dict(), ensure_ascii=False, indent=2),
@@ -111,6 +129,7 @@ def load_prepared_export(path: Path) -> PreparedExport:
         guide=value["guide"],
         cut_assets=value["cut_assets"],
         plan_path=str(Path(path)),
+        template_name=value.get("template_name") or "챙맛 템플릿",
     )
 
 
@@ -136,8 +155,15 @@ def validate_capcut_project(
         }
 
     canvas = document.get("canvas_config") or {}
-    if str(canvas.get("ratio") or "") != "9:16":
-        errors.append("canvas ratio is not 9:16")
+    canvas_ratio = str(canvas.get("ratio") or "")
+    canvas_width = int(canvas.get("width") or 0)
+    canvas_height = int(canvas.get("height") or 0)
+    if canvas_ratio != "9:16" and not (
+        canvas_ratio == "original"
+        and canvas_width == 1080
+        and canvas_height == 1920
+    ):
+        errors.append("canvas is not a 1080x1920 vertical project")
     if int(document.get("duration") or 0) <= 0:
         errors.append("project duration is missing or invalid")
 
@@ -206,7 +232,12 @@ def validate_capcut_project(
     }
 
 
-def commit_export(prepared: PreparedExport) -> dict[str, Any]:
+def commit_export(
+    prepared: PreparedExport,
+    *,
+    tts_cfg=None,
+    tts_out_dir: Optional[str] = None,
+) -> dict[str, Any]:
     """Perform the existing export only after the immutable plan validates."""
 
     for value in prepared.cut_assets.values():
@@ -214,9 +245,12 @@ def commit_export(prepared: PreparedExport) -> dict[str, Any]:
             raise ValueError(
                 "Prepared asset disappeared before commit; prepare the export again."
             )
-    result = export_to_capcut_project(
+    result = export_via_template(
         prepared.guide,
         root_override=prepared.root,
+        template_name=prepared.template_name,
+        tts_cfg=tts_cfg,
+        tts_out_dir=tts_out_dir,
         cut_assets=prepared.cut_assets,
     )
     result["prepared_export_id"] = prepared.id

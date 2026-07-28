@@ -96,6 +96,10 @@ class CutManifestTests(unittest.TestCase):
             page,
         )
         self.assertIn("summary.failures.push", page)
+        self.assertIn("로컬 Qwen 검수 중", page)
+        self.assertIn("data-cut-status", page)
+        self.assertIn("setInterval(refreshJobStatuses,2000)", page)
+        self.assertIn('setCutState(cut.id,"running")', page)
 
     def test_guide_conversion_is_versioned_and_does_not_mutate_input(self) -> None:
         guide = _guide()

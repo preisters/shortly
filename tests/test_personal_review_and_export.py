@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from shortly.apps.personal.automation.capcut_assets import (
+    PreparedExport,
+    commit_export,
     prepare_export,
     validate_capcut_project,
 )
@@ -21,7 +23,10 @@ from shortly.core.domain.assets import (
     MediaKind,
 )
 from shortly.core.use_cases.build_cut_manifest import build_cut_manifest
-from shortly.generate.capcut_export import _build_photo_segment
+from shortly.generate.capcut_export import (
+    _build_photo_segment,
+    _reference_asset_layout,
+)
 from shortly.llm.base import (
     LLMClient,
     LLMError,
@@ -124,6 +129,9 @@ class PersonalReviewAndExportTests(unittest.TestCase):
                 "shortly.apps.personal.automation.capcut_assets.find_capcut_draft_root",
                 return_value=capcut,
             ), patch(
+                "shortly.apps.personal.automation.capcut_assets._find_template_project",
+                return_value=capcut / "template",
+            ), patch(
                 "shortly.apps.personal.automation.capcut_assets._pick_templates",
                 return_value=({}, {}, {}),
             ):
@@ -138,7 +146,57 @@ class PersonalReviewAndExportTests(unittest.TestCase):
             self.assertEqual(
                 prepared.cut_assets["s000-c00"]["candidate_id"], candidate.id
             )
+            self.assertEqual(
+                prepared.cut_assets["s000-c00"]["path"], str(asset.resolve())
+            )
             self.assertEqual(list(capcut.iterdir()), [])
+
+    def test_commit_export_reuses_template_tts_and_selected_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            asset = root / "asset.png"
+            asset.write_bytes(b"fixture")
+            prepared = PreparedExport(
+                id="export",
+                manifest_id="manifest",
+                root=str(root),
+                guide={"title": "fixture", "segments": []},
+                cut_assets={
+                    "s000-c00": {
+                        "path": str(asset),
+                        "media_kind": "image",
+                        "candidate_id": "candidate",
+                    }
+                },
+                plan_path=str(root / "prepared-export.json"),
+                template_name="챙맛 템플릿",
+            )
+            expected = {"ok": False, "reason": "fixture"}
+
+            with patch(
+                "shortly.apps.personal.automation.capcut_assets.export_via_template",
+                return_value=expected,
+            ) as export:
+                result = commit_export(
+                    prepared,
+                    tts_cfg="tts-config",
+                    tts_out_dir="tts-output",
+                )
+
+        self.assertEqual(result["prepared_export_id"], "export")
+        export.assert_called_once_with(
+            prepared.guide,
+            root_override=str(root),
+            template_name="챙맛 템플릿",
+            tts_cfg="tts-config",
+            tts_out_dir="tts-output",
+            cut_assets=prepared.cut_assets,
+        )
+
+    def test_reference_layout_follows_manual_aspect_ratio_medians(self) -> None:
+        self.assertEqual(_reference_asset_layout(1024, 1536), (1.0, 0.0))
+        self.assertEqual(_reference_asset_layout(1000, 1000), (0.78, -0.03))
+        self.assertEqual(_reference_asset_layout(1280, 720), (0.87, 0.0))
 
     def test_capcut_segment_can_reference_generated_video(self) -> None:
         template = {
@@ -175,7 +233,11 @@ class PersonalReviewAndExportTests(unittest.TestCase):
             asset.write_bytes(b"fixture")
             document = {
                 "duration": 1_000_000,
-                "canvas_config": {"ratio": "9:16"},
+                "canvas_config": {
+                    "ratio": "original",
+                    "width": 1080,
+                    "height": 1920,
+                },
                 "materials": {
                     "videos": [
                         {

@@ -163,6 +163,21 @@ _BG_COLOR = (30, 32, 41)   # 기본 프레임 배경색(어두운 슬레이트)
 _CARD_FILL = (240, 240, 240)   # 컷 이미지 카드 배경
 _CARD_BORDER = (120, 120, 130)  # 컷 이미지 카드 테두리
 
+# 챙맛 채널에서 사람이 직접 조정한 프로젝트. 이 프로젝트들의 콘텐츠 이미지
+# 세그먼트를 소재 템플릿으로만 사용하고, 원본 프로젝트 자체는 수정하지 않는다.
+_REFERENCE_PROJECT_MARKERS = (
+    "사실 너만 모르던 스테디셀러 떡",
+    "사실 너만 모르던 스터디셀러 떡",
+    "장난감이 소금빵이 돼버린 왁뿌볼",
+    "억지로 유행시킨 버터떡",
+    "사실 정체를 아무도 모르는 우베",
+)
+_REFERENCE_SCAFFOLD_FILES = (
+    "챙맛.png",
+    "프로필_이미지-removebg-preview.png",
+    "blank_1080x1920.png",
+)
+
 def _find_font(*needles: str) -> Optional[str]:
     """설치된 폰트 폴더(사용자/시스템)에서 파일명이 needle 을 포함하는 폰트를 찾습니다."""
     dirs = [
@@ -279,6 +294,73 @@ def _pick_templates(root: Path):
         if base and text_tpl and image_tpl and image_tpl.get("is_photo"):
             break
     return base, text_tpl, image_tpl
+
+
+def _pick_reference_image_template(root: Path):
+    """지정된 챙맛 레퍼런스 프로젝트에서 실제 콘텐츠 이미지 세그먼트를 찾는다."""
+
+    try:
+        projects = [
+            path
+            for path in root.iterdir()
+            if path.is_dir()
+            and (path / "draft_content.json").is_file()
+            and any(marker in path.name for marker in _REFERENCE_PROJECT_MARKERS)
+        ]
+    except OSError:
+        projects = []
+    projects.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    for project in projects:
+        try:
+            document = _read_json(project / "draft_content.json")
+        except (OSError, ValueError):
+            continue
+        materials = document.get("materials") or {}
+        index = _index_materials(materials)
+        for track in document.get("tracks") or []:
+            if track.get("type") != "video":
+                continue
+            for segment in track.get("segments") or []:
+                info = index.get(segment.get("material_id"))
+                if not info:
+                    continue
+                material = info[1]
+                if material.get("type") != "photo":
+                    continue
+                filename = Path(str(material.get("path") or "")).name
+                if filename in _REFERENCE_SCAFFOLD_FILES:
+                    continue
+                return {
+                    "seg": segment,
+                    "materials": materials,
+                    "project": project.name,
+                }
+    return None
+
+
+def _reference_asset_layout(width: int, height: int) -> Tuple[float, float]:
+    """수동 레퍼런스 108개 클립의 종횡비별 중앙값에 가까운 배치를 반환한다."""
+
+    ratio = width / height if width > 0 and height > 0 else 2 / 3
+    if ratio < 0.8:
+        return 1.0, 0.0
+    if ratio <= 1.2:
+        return 0.78, -0.03
+    return 0.87, 0.0
+
+
+def _asset_dimensions(path: Path, media_kind: str) -> Tuple[int, int]:
+    if media_kind != "video":
+        try:
+            from PIL import Image
+
+            with Image.open(path) as image:
+                width, height = image.size
+                if width > 0 and height > 0:
+                    return int(width), int(height)
+        except (ImportError, OSError, ValueError):
+            pass
+    return _CANVAS_W, _CANVAS_H
 
 
 def _clone_seg(seg: Dict, src_mats: Dict):
@@ -542,10 +624,11 @@ def _build_photo_segment(image_tpl: Dict, img_path: Path, start_us: int,
     """컷/배경 이미지용 photo 세그먼트 1개를 생성(세그먼트, 복제소재)."""
     seg, cloned, main = _clone_seg(image_tpl["seg"], image_tpl["materials"])
     if main is not None:
+        source_width, source_height = _asset_dimensions(img_path, media_kind)
         main["type"] = "video" if media_kind == "video" else "photo"
         main["path"] = str(img_path).replace("\\", "/")
-        main["width"] = _CANVAS_W
-        main["height"] = _CANVAS_H
+        main["width"] = source_width
+        main["height"] = source_height
         main["duration"] = dur_us if media_kind == "video" else _PHOTO_DURATION
         main["has_audio"] = False
         main["material_name"] = img_path.name
@@ -1464,7 +1547,8 @@ def export_via_template(guide: Dict,
                         root_override: Optional[str] = None,
                         template_name: str = "챙맛 템플릿",
                         tts_cfg=None,
-                        tts_out_dir: Optional[str] = None) -> Dict:
+                        tts_out_dir: Optional[str] = None,
+                        cut_assets: Optional[Dict[str, Dict]] = None) -> Dict:
     """기존 '템플릿' 프로젝트를 복사한 뒤, 그 복사본에만 제목/자막/추천 메모/TTS
     오디오를 채워 넣습니다. 원본 템플릿은 절대 수정하지 않습니다.
 
@@ -1483,6 +1567,7 @@ def export_via_template(guide: Dict,
         return {"ok": False,
                 "reason": f"'{template_name}' 프로젝트를 찾지 못했습니다. "
                           "CapCut 에 해당 이름의 프로젝트가 있는지 확인하세요."}
+    cut_assets = cut_assets or {}
 
     segments = [s for s in (guide.get("segments") or [])
                 if (s.get("narration") or s.get("caption") or "").strip()]
@@ -1579,6 +1664,14 @@ def export_via_template(guide: Dict,
     # 4) 자막 트랙 + 추천 메모 트랙
     caption_segs: List[Dict] = []
     reco_segs: List[Dict] = []
+    seg_span: Dict[int, List[int]] = {}
+    for unit in units:
+        span = seg_span.setdefault(
+            unit["seg"],
+            [unit["start"], unit["start"] + unit["dur"]],
+        )
+        span[0] = min(span[0], unit["start"])
+        span[1] = max(span[1], unit["start"] + unit["dur"])
     if cap_style_seg is not None:
         for k, u in enumerate(units):
             # 자막 조각은 이미 짧은 단위이므로 강제 줄바꿈 없이 한 줄로 노출한다.
@@ -1591,11 +1684,6 @@ def export_via_template(guide: Dict,
             caption_segs.append(cseg)
 
         # 세그먼트별 추천(이미지/매체/효과)을 메모 텍스트로 하단에 배치
-        seg_span: Dict[int, List[int]] = {}
-        for u in units:
-            span = seg_span.setdefault(u["seg"], [u["start"], u["start"] + u["dur"]])
-            span[0] = min(span[0], u["start"])
-            span[1] = max(span[1], u["start"] + u["dur"])
         # 세그먼트를 추천 컷 수만큼 나눠 '컷별' 메모를 배치(소스 컷 수와 맞춤)
         style_for_reco = style_seg or cap_style_seg
         reco_no = 0
@@ -1630,7 +1718,66 @@ def export_via_template(guide: Dict,
                 _merge_materials(mats, cloned_r)
                 reco_segs.append(rseg)
 
-    # 5) TTS 오디오 트랙(제목 + 대사)
+    # 5) 선택된 생성 에셋. 원본 종횡비를 유지하고, 지정 레퍼런스 프로젝트의
+    # 수동 조정 중앙값(세로 1.0 / 정방형 0.78 / 가로 0.87)을 적용한다.
+    cut_segs: List[Dict] = []
+    reference_template = _pick_reference_image_template(root)
+    if reference_template is None:
+        _, _, reference_template = _pick_templates(root)
+    reference_project = (
+        reference_template.get("project")
+        if isinstance(reference_template, dict)
+        else None
+    )
+    if cut_assets and reference_template is not None:
+        cuts_dir = proj_dir / "shortly_cuts"
+        cuts_dir.mkdir(parents=True, exist_ok=True)
+        cut_no = 0
+        for i, segment in enumerate(segments):
+            if i not in seg_span:
+                continue
+            segment_index = int(segment.get("index", i))
+            n_cuts = max(
+                1,
+                min(int(segment.get("cuts_suggested") or 1), 6),
+            )
+            start, end = seg_span[i]
+            duration = max(end - start, 400_000)
+            for cut_index in range(n_cuts):
+                cut_id = f"s{segment_index:03d}-c{cut_index:02d}"
+                selected = cut_assets.get(cut_id) or {}
+                source = Path(str(selected.get("path") or ""))
+                if not source.is_file():
+                    continue
+                cut_no += 1
+                media_kind = str(selected.get("media_kind") or "image")
+                suffix = source.suffix.lower() or (
+                    ".mp4" if media_kind == "video" else ".png"
+                )
+                target = cuts_dir / f"cut_{cut_no:02d}{suffix}"
+                shutil.copy2(source, target)
+                cut_start = start + int(round(cut_index * duration / n_cuts))
+                cut_end = start + int(
+                    round((cut_index + 1) * duration / n_cuts)
+                )
+                cut_duration = max(300_000, cut_end - cut_start)
+                width, height = _asset_dimensions(target, media_kind)
+                scale, transform_y = _reference_asset_layout(width, height)
+                video_segment, cloned_video = _build_photo_segment(
+                    reference_template,
+                    target,
+                    cut_start,
+                    cut_duration,
+                    scale,
+                    transform_y,
+                    render_index=1000 + cut_no,
+                    media_kind=media_kind,
+                )
+                video_segment["extra_material_refs"] = []
+                _merge_materials(mats, cloned_video)
+                cut_segs.append(video_segment)
+
+    # 6) TTS 오디오 트랙(제목 + 대사)
     audio_segs: List[Dict] = []
     audio_tpl = None
     need_audio = bool(title_wav) or plan["audio_ok"] > 0
@@ -1651,12 +1798,14 @@ def export_via_template(guide: Dict,
                 _merge_materials(mats, cloned_a)
                 audio_segs.append(aseg)
 
-    # 6) 새 트랙들을 기존 트랙 뒤에 추가(원본 트랙 유지)
+    # 7) 새 트랙들을 기존 트랙 뒤에 추가(원본 트랙 유지)
     def _track(ttype: str, segs: List[Dict]) -> Dict:
         return {"id": _new_id(), "type": ttype, "segments": segs,
                 "flag": 0, "attribute": 0, "name": "", "is_default_name": True}
 
     tracks = dc.setdefault("tracks", [])
+    if cut_segs:
+        tracks.append(_track("video", cut_segs))
     if reco_segs:
         tracks.append(_track("text", reco_segs))
     if caption_segs:
@@ -1664,7 +1813,7 @@ def export_via_template(guide: Dict,
     if audio_segs:
         tracks.append(_track("audio", audio_segs))
 
-    # 7) 내부 id 일괄 재생성(원본과 완전히 분리) + 파일 기록
+    # 8) 내부 id 일괄 재생성(원본과 완전히 분리) + 파일 기록
     now_s = int(time.time())
     now_us = int(time.time() * _US)
     fold_path = str(proj_dir).replace("\\", "/")
@@ -1710,6 +1859,8 @@ def export_via_template(guide: Dict,
         "template": tpl_dir.name,
         "segments": len(caption_segs),
         "reco_memos": len(reco_segs),
+        "inserted_assets": len(cut_segs),
+        "asset_layout_reference": reference_project,
         "tts_generated": plan["audio_ok"],
         "tts_reused": plan.get("audio_reused", 0) + (1 if title_reused else 0),
         "tts_failed": plan["audio_fail"],

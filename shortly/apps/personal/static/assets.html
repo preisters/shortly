@@ -16,6 +16,9 @@
     .asset-guide{line-height:1.6;color:#c9ccda}.asset-guide b{color:#fff}
     .reason{min-width:220px;color:#b9bdca;font-size:13px;line-height:1.45}
     .fact{display:inline-block;margin-top:4px;padding:2px 6px;border-radius:4px;background:#5b3030;color:#ffd1d1;font-size:11px}
+    .state{font-weight:700;white-space:nowrap}.state-running{color:#ffd66b}.state-completed{color:#79e2a7}.state-failed{color:#ff8e8e}
+    .spinner{display:inline-block;width:12px;height:12px;margin-right:6px;border:2px solid #73798f;border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}
+    @keyframes spin{to{transform:rotate(360deg)}}
     pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0d0e12;padding:14px;border-radius:8px}
     table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #303341;text-align:left}
   </style>
@@ -62,7 +65,9 @@
     </div>
   </section>
   <script>
-    let manifest=null, preparedExport=null, automationStatus=null, batchRunning=false;
+    let manifest=null, preparedExport=null, automationStatus=null, batchRunning=false, reviewRunning=false;
+    const cutStates=new Map();
+    let jobRefreshTimer=null;
     const assetTypes=["real_image","stock_image","generated_image","generated_video","meme","screenshot","manual_required"];
     const assetLabels={
       real_image:"실제 이미지 · 직접 확보",
@@ -84,6 +89,43 @@
       return String(value||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
     }
     function show(value){result.textContent=JSON.stringify(value,null,2)}
+    function statusLabel(cut){
+      const state=cutStates.get(cut.id);
+      if(state?.status==="running"||state?.status==="submitted"){
+        return `<span class="state state-running"><span class="spinner"></span>${state.status==="submitted"?"생성 처리 중":"생성 중"}</span>`;
+      }
+      if(state?.status==="completed"||cut.selected_candidate_id){
+        return '<span class="state state-completed">생성 완료</span>';
+      }
+      if(state?.status==="failed"||state?.status==="manual_required"){
+        return `<span class="state state-failed">생성 실패</span>`;
+      }
+      if(state?.status==="approved"||state?.status==="awaiting_approval"){
+        return '<span class="state state-running">승인 대기</span>';
+      }
+      return '<span class="muted">대기</span>';
+    }
+    function setCutState(cutId,status,jobId=null,error=""){
+      cutStates.set(cutId,{status,jobId,error});
+      const cell=document.querySelector(`[data-cut-status="${CSS.escape(cutId)}"]`);
+      const cut=manifest?.cuts.find(item=>item.id===cutId);
+      if(cell&&cut) cell.innerHTML=statusLabel(cut);
+    }
+    async function refreshJobStatuses(){
+      if(!manifest) return;
+      try{
+        const jobs=await api(`/api/personal/jobs?manifest_id=${encodeURIComponent(manifest.manifest_id)}`);
+        const latest=new Map();
+        jobs.forEach(job=>{if(!latest.has(job.cut_id)) latest.set(job.cut_id,job)});
+        latest.forEach(job=>setCutState(job.cut_id,job.status,job.id,job.error||""));
+      }catch(_error){}
+    }
+    function startJobRefresh(){
+      if(jobRefreshTimer) clearInterval(jobRefreshTimer);
+      refreshJobStatuses();
+      jobRefreshTimer=setInterval(refreshJobStatuses,2000);
+    }
+    function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
     function pendingGeneratedCuts(){
       if(!manifest) return [];
       return manifest.cuts.filter(c=>
@@ -111,11 +153,21 @@
           estimated_cost_usd:config.estimate
         })
       });
+      setCutState(cut.id,job.status,job.id);
       const approval=await api(`/api/personal/jobs/${job.id}/approve`,{method:"POST"});
-      return api(`/api/personal/jobs/${job.id}/execute`,{
+      setCutState(cut.id,"running",job.id);
+      await sleep(0);
+      let current=await api(`/api/personal/jobs/${job.id}/execute`,{
         method:"POST",
         body:JSON.stringify({approval_token:approval.approval_token})
       });
+      setCutState(cut.id,current.status,job.id,current.error||"");
+      while(current.status==="submitted"){
+        await sleep(5000);
+        current=await api(`/api/personal/jobs/${job.id}/poll`,{method:"POST"});
+        setCutState(cut.id,current.status,job.id,current.error||"");
+      }
+      return current;
     }
     function updateBatchControls(){
       const button=document.querySelector("#generate-all");
@@ -138,7 +190,7 @@
       target.innerHTML="<table><thead><tr><th>컷</th><th>프롬프트</th><th>권장 유형</th><th>판정 이유</th><th>상태</th><th>실행</th></tr></thead><tbody>"+
         manifest.cuts.map(c=>`<tr><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.prompt)}</td><td><select data-cut="${escapeHtml(c.id)}" ${batchRunning?"disabled":""}>
         ${assetTypes.map(v=>`<option value="${v}" ${v===c.asset_type?"selected":""}>${assetLabels[v]}</option>`).join("")}
-        </select></td><td class="reason">${escapeHtml((c.notes||[]).join(" "))}${c.fact_sensitive?'<br><span class="fact">사실성 보호</span>':""}</td><td>${c.selected_candidate_id?"선택됨":"대기"}</td><td>${c.asset_type.startsWith("generated_")?`<button data-generate="${escapeHtml(c.id)}" ${batchRunning?"disabled":""}>비용 확인·생성</button>`:c.asset_type==="stock_image"?"스톡 검색·수동 삽입":c.asset_type==="real_image"?"원본 직접 확보":"수동 처리"}</td></tr>`).join("")+"</tbody></table>";
+        </select></td><td class="reason">${escapeHtml((c.notes||[]).join(" "))}${c.fact_sensitive?'<br><span class="fact">사실성 보호</span>':""}</td><td data-cut-status="${escapeHtml(c.id)}">${statusLabel(c)}</td><td>${c.asset_type.startsWith("generated_")?`<button data-generate="${escapeHtml(c.id)}" ${batchRunning?"disabled":""}>비용 확인·생성</button>`:c.asset_type==="stock_image"?"스톡 검색·수동 삽입":c.asset_type==="real_image"?"원본 직접 확보":"수동 처리"}</td></tr>`).join("")+"</tbody></table>";
       target.querySelectorAll("select").forEach(el=>el.onchange=async()=>{
         try{await api(`/api/personal/manifests/${manifest.manifest_id}/cuts/${el.dataset.cut}`,{method:"PATCH",body:JSON.stringify({asset_type:el.value})});manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);render()}catch(e){result.textContent=e.message}
       });
@@ -147,9 +199,10 @@
           const cut=manifest.cuts.find(c=>c.id===el.dataset.generate);
           const config=await generationConfig(cut);
           if(!confirm(`${cut.id}\\n${config.provider} / ${config.model}\\n예상 비용 USD $${config.estimate.toFixed(2)}\\n실제 유료 생성을 승인할까요?`)) return;
+          setCutState(cut.id,"running");
           show(await executeGeneration(cut,config));
           manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);render();
-        }catch(e){result.textContent=e.message}
+        }catch(e){setCutState(el.dataset.generate,"failed",null,e.message);result.textContent=e.message}
       });
       updateBatchControls();
     }
@@ -179,12 +232,16 @@
           document.querySelector("#batch-status").textContent=
             `${index+1}/${configured.length} 생성 중 · ${cut.id} · ${config.kind==="video"?"영상":"이미지"}`;
           try{
+            setCutState(cut.id,"running");
             const job=await executeGeneration(cut,config);
-            if(job.status==="submitted") summary.submitted+=1;
-            else summary.completed+=1;
+            if(job.status==="completed") summary.completed+=1;
+            else summary.submitted+=1;
+            manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);
+            render();
           }catch(error){
             summary.failed+=1;
             summary.failures.push({cut_id:cut.id,error:error.message});
+            setCutState(cut.id,"failed",null,error.message);
           }
         }
         manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);
@@ -203,10 +260,15 @@
       }
     };
     document.querySelector("#manifest-create").onclick=async()=>{try{
-      manifest=await api("/api/personal/manifests",{method:"POST",body:JSON.stringify({guide:JSON.parse(document.querySelector("#guide").value),overrides:{}})});render();show(manifest)
+      manifest=await api("/api/personal/manifests",{method:"POST",body:JSON.stringify({guide:JSON.parse(document.querySelector("#guide").value),overrides:{}})});render();startJobRefresh();show(manifest)
     }catch(e){result.textContent=e.message}};
     document.querySelector("#review").onclick=async()=>{try{show(await api(`/api/personal/manifests/${manifest.manifest_id}/review`,{method:"POST"}))}catch(e){result.textContent=e.message}};
-    document.querySelector("#qwen").onclick=async()=>{try{show(await api(`/api/personal/manifests/${manifest.manifest_id}/review?local_qwen=true`,{method:"POST"}))}catch(e){result.textContent=e.message}};
+    document.querySelector("#qwen").onclick=async()=>{const button=document.querySelector("#qwen");try{
+      if(!manifest) throw new Error("컷 명세를 먼저 생성하세요.");
+      reviewRunning=true;button.disabled=true;button.innerHTML='<span class="spinner"></span>로컬 Qwen 검수 중';
+      result.textContent="로컬 Qwen이 컷 구성과 에셋을 검수하고 있습니다. 잠시 기다려 주세요.";
+      show(await api(`/api/personal/manifests/${manifest.manifest_id}/review?local_qwen=true`,{method:"POST"}))
+    }catch(e){result.textContent=e.message}finally{reviewRunning=false;button.disabled=false;button.textContent="로컬 Qwen 검수"}};
     document.querySelector("#usage").onclick=async()=>{try{show(await api(`/api/personal/usage?manifest_id=${manifest.manifest_id}`))}catch(e){result.textContent=e.message}};
     document.querySelector("#prepare-export").onclick=async()=>{try{
       preparedExport=await api("/api/personal/exports/prepare",{method:"POST",body:JSON.stringify({manifest_id:manifest.manifest_id,guide:JSON.parse(document.querySelector("#guide").value),capcut_root:document.querySelector("#capcut-root").value||null})});show(preparedExport)
@@ -221,7 +283,7 @@
       const channel=params.get("channel"), name=params.get("name"), manifestId=params.get("manifest_id");
       if(!channel||!name){
         if(manifestId){
-          try{manifest=await api(`/api/personal/manifests/${encodeURIComponent(manifestId)}`);render();show(manifest)}
+          try{manifest=await api(`/api/personal/manifests/${encodeURIComponent(manifestId)}`);render();startJobRefresh();show(manifest)}
           catch(e){result.textContent=e.message}
         }
         return;
@@ -237,6 +299,7 @@
         next.searchParams.set("manifest_id",manifest.manifest_id);
         window.history.replaceState({}, "", next);
         render();
+        startJobRefresh();
         show({source:{channel,name,reused:imported.reused},manifest});
       }catch(e){
         sourceStatus.className="error";

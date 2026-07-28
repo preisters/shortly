@@ -27,6 +27,16 @@ from .settings import PersonalAutomationSettings
 from .store import AutomationStore
 
 
+def _image_generation_prompt(prompt: str) -> str:
+    return (
+        f"{prompt.strip()}\n\n"
+        "Composition requirements: create a vertical 2:3 image at 1024x1536. "
+        "Keep the main subject centered with comfortable safe margins on every side "
+        "so it can be placed inside a 9:16 Shorts frame without cutting off important "
+        "details. Do not add captions, logos, watermarks, borders, or UI elements."
+    )
+
+
 class AssetJobExecutor:
     def __init__(
         self,
@@ -180,8 +190,9 @@ class AssetJobExecutor:
 
     def _run_image(self, job: dict) -> dict:
         request = ImageGenerationRequest(
-            prompt=job["request"]["prompt"],
+            prompt=_image_generation_prompt(job["request"]["prompt"]),
             model=job["model"],
+            size="1024x1536",
             idempotency_key=job["idempotency_key"],
         )
         asset = self.image_providers[job["provider"]].generate(request)

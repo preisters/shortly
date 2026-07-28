@@ -5,7 +5,10 @@ import unittest
 from pathlib import Path
 
 from shortly.apps.personal.assets.fake import FakeImageProvider
-from shortly.apps.personal.automation.executor import AssetJobExecutor
+from shortly.apps.personal.automation.executor import (
+    AssetJobExecutor,
+    _image_generation_prompt,
+)
 from shortly.apps.personal.automation.settings import PersonalAutomationSettings
 from shortly.apps.personal.automation.store import (
     AutomationStore,
@@ -95,6 +98,14 @@ class AssetJobExecutorTests(unittest.TestCase):
         with self.assertRaises(BudgetExceededError):
             executor.approve(job["id"])
         self.assertEqual(self.provider.calls, 0)
+
+    def test_image_prompt_requests_reference_safe_vertical_composition(self) -> None:
+        prompt = _image_generation_prompt("협상 장면")
+
+        self.assertIn("vertical 2:3", prompt)
+        self.assertIn("1024x1536", prompt)
+        self.assertIn("safe margins", prompt)
+        self.assertIn("Do not add captions", prompt)
 
 
 if __name__ == "__main__":

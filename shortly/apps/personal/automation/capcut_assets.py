@@ -122,12 +122,24 @@ def prepare_export(
 
 def load_prepared_export(path: Path) -> PreparedExport:
     value = json.loads(Path(path).read_text(encoding="utf-8"))
+    cut_assets = dict(value["cut_assets"])
+    for cut_id, item in cut_assets.items():
+        upgraded = dict(item)
+        asset_path = Path(str(upgraded.get("path") or ""))
+        if (
+            upgraded.get("media_kind") == "image"
+            and asset_path.name.startswith("prepared-")
+        ):
+            originals = sorted(asset_path.parent.glob("*-original.*"))
+            if originals:
+                upgraded["path"] = str(originals[0].resolve())
+        cut_assets[cut_id] = upgraded
     return PreparedExport(
         id=value["id"],
         manifest_id=value["manifest_id"],
         root=value["root"],
         guide=value["guide"],
-        cut_assets=value["cut_assets"],
+        cut_assets=cut_assets,
         plan_path=str(Path(path)),
         template_name=value.get("template_name") or "챙맛 템플릿",
     )

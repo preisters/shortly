@@ -8,6 +8,7 @@ from unittest.mock import patch
 from shortly.apps.personal.automation.capcut_assets import (
     PreparedExport,
     commit_export,
+    load_prepared_export,
     prepare_export,
     validate_capcut_project,
 )
@@ -193,8 +194,47 @@ class PersonalReviewAndExportTests(unittest.TestCase):
             cut_assets=prepared.cut_assets,
         )
 
+    def test_legacy_prepared_image_is_upgraded_to_original(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared_image = root / "prepared-1080x1920.jpg"
+            original_image = root / "image-original.png"
+            prepared_image.write_bytes(b"prepared")
+            original_image.write_bytes(b"original")
+            plan = root / "prepared-export.json"
+            plan.write_text(
+                __import__("json").dumps(
+                    {
+                        "id": "export",
+                        "manifest_id": "manifest",
+                        "root": str(root),
+                        "guide": {},
+                        "cut_assets": {
+                            "s000-c00": {
+                                "path": str(prepared_image),
+                                "media_kind": "image",
+                                "candidate_id": "candidate",
+                            }
+                        },
+                        "plan_path": str(plan),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = load_prepared_export(plan)
+
+        self.assertEqual(
+            loaded.cut_assets["s000-c00"]["path"],
+            str(original_image.resolve()),
+        )
+
     def test_reference_layout_follows_manual_aspect_ratio_medians(self) -> None:
-        self.assertEqual(_reference_asset_layout(1024, 1536), (1.0, 0.0))
+        self.assertEqual(_reference_asset_layout(1024, 1536), (0.7, -0.17))
+        self.assertEqual(
+            _reference_asset_layout(1080, 1920, "video"),
+            (0.8, 0.0),
+        )
         self.assertEqual(_reference_asset_layout(1000, 1000), (0.78, -0.03))
         self.assertEqual(_reference_asset_layout(1280, 720), (0.87, 0.0))
 

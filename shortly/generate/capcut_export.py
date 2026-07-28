@@ -338,12 +338,18 @@ def _pick_reference_image_template(root: Path):
     return None
 
 
-def _reference_asset_layout(width: int, height: int) -> Tuple[float, float]:
+def _reference_asset_layout(
+    width: int,
+    height: int,
+    media_kind: str = "image",
+) -> Tuple[float, float]:
     """수동 레퍼런스 108개 클립의 종횡비별 중앙값에 가까운 배치를 반환한다."""
 
     ratio = width / height if width > 0 and height > 0 else 2 / 3
+    if media_kind == "video" and ratio < 0.8:
+        return 0.8, 0.0
     if ratio < 0.8:
-        return 1.0, 0.0
+        return 0.7, -0.17
     if ratio <= 1.2:
         return 0.78, -0.03
     return 0.87, 0.0
@@ -1762,7 +1768,11 @@ def export_via_template(guide: Dict,
                 )
                 cut_duration = max(300_000, cut_end - cut_start)
                 width, height = _asset_dimensions(target, media_kind)
-                scale, transform_y = _reference_asset_layout(width, height)
+                scale, transform_y = _reference_asset_layout(
+                    width,
+                    height,
+                    media_kind,
+                )
                 video_segment, cloned_video = _build_photo_segment(
                     reference_template,
                     target,

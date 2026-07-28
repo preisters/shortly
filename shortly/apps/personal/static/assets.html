@@ -11,6 +11,7 @@
     textarea,input,select,button{font:inherit;color:inherit;background:#222532;border:1px solid #464b60;border-radius:7px;padding:9px}
     textarea{width:100%;min-height:170px;box-sizing:border-box}
     button{cursor:pointer;background:#4659d8} button.secondary{background:#303445}
+    button:disabled{opacity:.55;cursor:not-allowed}
     .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.muted{color:#a7abba}.error{color:#ff8e8e}
     .asset-guide{line-height:1.6;color:#c9ccda}.asset-guide b{color:#fff}
     .reason{min-width:220px;color:#b9bdca;font-size:13px;line-height:1.45}
@@ -36,6 +37,10 @@
       <li><b>실제 이미지</b>: 제품·인물·사건의 원본 사진을 직접 확보해야 하는 컷</li>
       <li><b>수동 삽입 필요</b>: 사실성이 중요하거나 자동 확보 수단이 없는 컷이며 AI 생성 비권장</li>
     </ul>
+    <div class="row">
+      <button id="generate-all" disabled>AI 생성 컷 전체 생성</button>
+      <span id="batch-status" class="muted">생성할 컷을 확인하는 중</span>
+    </div>
     <div id="cuts" class="muted">컷 명세를 먼저 생성하세요.</div>
   </section>
   <section>
@@ -57,7 +62,7 @@
     </div>
   </section>
   <script>
-    let manifest=null, preparedExport=null, automationStatus=null;
+    let manifest=null, preparedExport=null, automationStatus=null, batchRunning=false;
     const assetTypes=["real_image","stock_image","generated_image","generated_video","meme","screenshot","manual_required"];
     const assetLabels={
       real_image:"실제 이미지 · 직접 확보",
@@ -79,33 +84,124 @@
       return String(value||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
     }
     function show(value){result.textContent=JSON.stringify(value,null,2)}
+    function pendingGeneratedCuts(){
+      if(!manifest) return [];
+      return manifest.cuts.filter(c=>
+        c.asset_type.startsWith("generated_") &&
+        !c.fact_sensitive &&
+        !c.selected_candidate_id
+      );
+    }
+    async function generationConfig(cut){
+      automationStatus ||= await api("/api/personal/automation/status");
+      const kind=cut.asset_type==="generated_video"?"video":"image";
+      return {
+        kind,
+        provider:kind==="video"?automationStatus.video_provider:automationStatus.image_provider,
+        model:kind==="video"?automationStatus.video_model:automationStatus.image_model,
+        estimate:automationStatus.default_estimates_usd[kind]
+      };
+    }
+    async function executeGeneration(cut,config){
+      const job=await api(`/api/personal/manifests/${manifest.manifest_id}/cuts/${cut.id}/jobs`,{
+        method:"POST",
+        body:JSON.stringify({
+          provider:config.provider,
+          model:config.model,
+          estimated_cost_usd:config.estimate
+        })
+      });
+      const approval=await api(`/api/personal/jobs/${job.id}/approve`,{method:"POST"});
+      return api(`/api/personal/jobs/${job.id}/execute`,{
+        method:"POST",
+        body:JSON.stringify({approval_token:approval.approval_token})
+      });
+    }
+    function updateBatchControls(){
+      const button=document.querySelector("#generate-all");
+      const status=document.querySelector("#batch-status");
+      const targets=pendingGeneratedCuts();
+      const images=targets.filter(c=>c.asset_type==="generated_image").length;
+      const videos=targets.filter(c=>c.asset_type==="generated_video").length;
+      button.disabled=batchRunning||targets.length===0;
+      button.textContent=batchRunning?"AI 에셋 생성 진행 중":`AI 생성 컷 전체 생성 (${targets.length})`;
+      if(!batchRunning){
+        status.textContent=targets.length
+          ? `대상: 이미지 ${images}컷 · 영상 ${videos}컷`
+          : "생성 대기 중인 AI 에셋이 없습니다.";
+      }
+    }
     function render(){
       document.querySelector("#manifest-id").textContent=manifest?.manifest_id||"";
       const target=document.querySelector("#cuts");
-      if(!manifest){target.textContent="컷 명세를 먼저 생성하세요.";return}
+      if(!manifest){target.textContent="컷 명세를 먼저 생성하세요.";updateBatchControls();return}
       target.innerHTML="<table><thead><tr><th>컷</th><th>프롬프트</th><th>권장 유형</th><th>판정 이유</th><th>상태</th><th>실행</th></tr></thead><tbody>"+
-        manifest.cuts.map(c=>`<tr><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.prompt)}</td><td><select data-cut="${escapeHtml(c.id)}">
+        manifest.cuts.map(c=>`<tr><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.prompt)}</td><td><select data-cut="${escapeHtml(c.id)}" ${batchRunning?"disabled":""}>
         ${assetTypes.map(v=>`<option value="${v}" ${v===c.asset_type?"selected":""}>${assetLabels[v]}</option>`).join("")}
-        </select></td><td class="reason">${escapeHtml((c.notes||[]).join(" "))}${c.fact_sensitive?'<br><span class="fact">사실성 보호</span>':""}</td><td>${c.selected_candidate_id?"선택됨":"대기"}</td><td>${c.asset_type.startsWith("generated_")?`<button data-generate="${escapeHtml(c.id)}">비용 확인·생성</button>`:c.asset_type==="stock_image"?"스톡 검색·수동 삽입":c.asset_type==="real_image"?"원본 직접 확보":"수동 처리"}</td></tr>`).join("")+"</tbody></table>";
+        </select></td><td class="reason">${escapeHtml((c.notes||[]).join(" "))}${c.fact_sensitive?'<br><span class="fact">사실성 보호</span>':""}</td><td>${c.selected_candidate_id?"선택됨":"대기"}</td><td>${c.asset_type.startsWith("generated_")?`<button data-generate="${escapeHtml(c.id)}" ${batchRunning?"disabled":""}>비용 확인·생성</button>`:c.asset_type==="stock_image"?"스톡 검색·수동 삽입":c.asset_type==="real_image"?"원본 직접 확보":"수동 처리"}</td></tr>`).join("")+"</tbody></table>";
       target.querySelectorAll("select").forEach(el=>el.onchange=async()=>{
         try{await api(`/api/personal/manifests/${manifest.manifest_id}/cuts/${el.dataset.cut}`,{method:"PATCH",body:JSON.stringify({asset_type:el.value})});manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);render()}catch(e){result.textContent=e.message}
       });
       target.querySelectorAll("[data-generate]").forEach(el=>el.onclick=async()=>{
         try{
-          automationStatus ||= await api("/api/personal/automation/status");
           const cut=manifest.cuts.find(c=>c.id===el.dataset.generate);
-          const kind=cut.asset_type==="generated_video"?"video":"image";
-          const provider=kind==="video"?automationStatus.video_provider:automationStatus.image_provider;
-          const model=kind==="video"?automationStatus.video_model:automationStatus.image_model;
-          const estimate=automationStatus.default_estimates_usd[kind];
-          if(!confirm(`${cut.id}\\n${provider} / ${model}\\n예상 비용 USD $${estimate.toFixed(2)}\\n실제 유료 생성을 승인할까요?`)) return;
-          const job=await api(`/api/personal/manifests/${manifest.manifest_id}/cuts/${cut.id}/jobs`,{method:"POST",body:JSON.stringify({provider,model,estimated_cost_usd:estimate})});
-          const approval=await api(`/api/personal/jobs/${job.id}/approve`,{method:"POST"});
-          show(await api(`/api/personal/jobs/${job.id}/execute`,{method:"POST",body:JSON.stringify({approval_token:approval.approval_token})}));
+          const config=await generationConfig(cut);
+          if(!confirm(`${cut.id}\\n${config.provider} / ${config.model}\\n예상 비용 USD $${config.estimate.toFixed(2)}\\n실제 유료 생성을 승인할까요?`)) return;
+          show(await executeGeneration(cut,config));
           manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);render();
         }catch(e){result.textContent=e.message}
       });
+      updateBatchControls();
     }
+    document.querySelector("#generate-all").onclick=async()=>{
+      const targets=pendingGeneratedCuts();
+      if(!targets.length){updateBatchControls();return}
+      let finalBatchMessage="";
+      try{
+        const configured=[];
+        for(const cut of targets) configured.push({cut,config:await generationConfig(cut)});
+        const images=configured.filter(item=>item.config.kind==="image").length;
+        const videos=configured.filter(item=>item.config.kind==="video").length;
+        const estimate=configured.reduce((sum,item)=>sum+item.config.estimate,0);
+        if(!confirm(
+          `AI 에셋 ${configured.length}개를 순차 생성합니다.\\n`+
+          `이미지 ${images}컷 · 영상 ${videos}컷\\n`+
+          `총 예상 비용 USD $${estimate.toFixed(2)}\\n\\n`+
+          `사실성 보호·스톡·실제 이미지·완료된 컷은 제외됩니다.\\n`+
+          `실제 유료 생성을 한 번에 승인할까요?`
+        )) return;
+        batchRunning=true;
+        updateBatchControls();
+        render();
+        const summary={total:configured.length,completed:0,submitted:0,failed:0,failures:[]};
+        for(let index=0;index<configured.length;index++){
+          const {cut,config}=configured[index];
+          document.querySelector("#batch-status").textContent=
+            `${index+1}/${configured.length} 생성 중 · ${cut.id} · ${config.kind==="video"?"영상":"이미지"}`;
+          try{
+            const job=await executeGeneration(cut,config);
+            if(job.status==="submitted") summary.submitted+=1;
+            else summary.completed+=1;
+          }catch(error){
+            summary.failed+=1;
+            summary.failures.push({cut_id:cut.id,error:error.message});
+          }
+        }
+        manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);
+        show({batch_generation:summary});
+        finalBatchMessage=
+          `완료 ${summary.completed} · 처리 중 ${summary.submitted} · 실패 ${summary.failed}`;
+      }catch(error){
+        result.textContent=error.message;
+        finalBatchMessage="일괄 생성 준비 실패";
+      }finally{
+        batchRunning=false;
+        render();
+        if(finalBatchMessage){
+          document.querySelector("#batch-status").textContent=finalBatchMessage;
+        }
+      }
+    };
     document.querySelector("#manifest-create").onclick=async()=>{try{
       manifest=await api("/api/personal/manifests",{method:"POST",body:JSON.stringify({guide:JSON.parse(document.querySelector("#guide").value),overrides:{}})});render();show(manifest)
     }catch(e){result.textContent=e.message}};

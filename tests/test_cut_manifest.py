@@ -77,6 +77,26 @@ class _AssetDirectorLlm(LLMClient):
 
 
 class CutManifestTests(unittest.TestCase):
+    def test_personal_asset_console_exposes_safe_batch_generation(self) -> None:
+        page = (
+            Path(__file__).resolve().parents[1]
+            / "shortly"
+            / "apps"
+            / "personal"
+            / "static"
+            / "assets.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('id="generate-all"', page)
+        self.assertIn("pendingGeneratedCuts()", page)
+        self.assertIn("!c.fact_sensitive", page)
+        self.assertIn("!c.selected_candidate_id", page)
+        self.assertIn(
+            "for(let index=0;index<configured.length;index++)",
+            page,
+        )
+        self.assertIn("summary.failures.push", page)
+
     def test_guide_conversion_is_versioned_and_does_not_mutate_input(self) -> None:
         guide = _guide()
         before = repr(guide)

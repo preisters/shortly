@@ -503,8 +503,15 @@ def _create_runtime_app(settings):
 
     if settings.portable or settings.product is ProductKind.TEAM:
         from ..apps.team.api import create_app
-    else:
-        from ..apps.personal.api import create_app
+        return create_app()
+
+    from ..apps.personal.api import create_app
+
+    if settings.product is ProductKind.LEGACY:
+        return create_app(
+            base_settings=settings,
+            configure_environment=False,
+        )
     return create_app()
 
 

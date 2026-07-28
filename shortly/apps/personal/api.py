@@ -10,14 +10,30 @@ from ... import service as default_service
 from ...product_profile import ProductKind
 
 
-def create_app(*, service_api: Optional[Any] = None):
-    os.environ["SHORTLY_PRODUCT"] = ProductKind.PERSONAL.value
-    os.environ["SHORTLY_PORTABLE"] = "0"
+def create_app(
+    *,
+    service_api: Optional[Any] = None,
+    base_settings=None,
+    configure_environment: bool = True,
+):
+    """Create the personal HTTP surface.
+
+    Explicit personal launchers configure the personal product environment.
+    The legacy-compatible ``shortly web`` command can opt out so its existing
+    learning data, saved guides, and settings paths remain unchanged while the
+    personal-only automation routes are added.
+    """
+
+    if configure_environment:
+        os.environ["SHORTLY_PRODUCT"] = ProductKind.PERSONAL.value
+        os.environ["SHORTLY_PORTABLE"] = "0"
     from ...web.factory import create_product_app
     from .automation.api import create_automation_components, create_router
 
     app = create_product_app(ProductKind.PERSONAL, service_api=service_api)
-    automation_settings, store, executor = create_automation_components()
+    automation_settings, store, executor = create_automation_components(
+        base_settings=base_settings,
+    )
     # Extend concrete routes so route manifests and artifact-boundary tests can
     # inspect the personal surface on FastAPI versions that defer include_router.
     automation_router = create_router(

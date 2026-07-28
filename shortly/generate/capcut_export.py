@@ -45,7 +45,7 @@ def export_capcut_draft(guide: Dict, out_path: Path) -> Dict:
         text_materials.append({
             "id": tmat_id,
             "type": "text",
-            "content": s.get("caption", ""),
+            "content": _caption_safe_korean(s.get("caption", "")),
             "font_size": 12,
             "text_color": "#FFFFFF",
         })
@@ -467,7 +467,7 @@ def _clip(scale: float = 1.0, y: float = 0.0) -> Dict:
 
 def _split_display_units(text: str, unit_len: int = _CAPTION_UNIT_LEN) -> List[str]:
     """긴 나레이션을 소스처럼 '한 번에 한 줄'로 보여줄 짧은 단위들로 분할."""
-    text = re.sub(r"\s+", " ", (text or "").strip())
+    text = re.sub(r"\s+", " ", _caption_safe_korean(text))
     if not text:
         return []
     # 문장부호(마침표/물음표/쉼표 등) 뒤를 우선 분할 지점으로 표시
@@ -612,6 +612,7 @@ def _build_text_segment(text_tpl: Dict, text: str, start_us: int, dur_us: int,
                         y: float, font_size: float, wrap_chars: int,
                         render_index: int):
     """자막/제목용 텍스트 세그먼트 1개를 생성(세그먼트, 복제소재)."""
+    text = _caption_safe_korean(text)
     seg, cloned, main = _clone_seg(text_tpl["seg"], text_tpl["materials"])
     if main is not None:
         main["content"] = _make_text_content(
@@ -1334,6 +1335,70 @@ _QUOTE_PAIRS = {
     "“": "”",
 }
 
+_HANJA_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_HANJA_WORD_TO_HANGUL = {
+    "日本": "일본",
+    "美國": "미국",
+    "中國": "중국",
+    "韓國": "한국",
+    "英國": "영국",
+    "獨逸": "독일",
+    "佛蘭西": "프랑스",
+}
+_HANJA_TO_HANGUL = str.maketrans({
+    "日": "일본",
+    "月": "월",
+    "年": "년",
+    "人": "인",
+    "大": "대",
+    "小": "소",
+    "中": "중국",
+    "韓": "한국",
+    "美": "미국",
+    "英": "영국",
+    "獨": "독일",
+    "佛": "프랑스",
+    "北": "북",
+    "南": "남",
+    "東": "동",
+    "西": "서",
+    "前": "전",
+    "後": "후",
+    "上": "상",
+    "下": "하",
+    "內": "내",
+    "外": "외",
+    "新": "신",
+    "舊": "구",
+    "有": "유",
+    "無": "무",
+    "第": "제",
+    "次": "차",
+    "社": "사",
+    "國": "국",
+    "對": "대",
+    "亞": "아",
+})
+
+
+def _caption_safe_korean(text: str) -> str:
+    """지원하지 않는 한자를 자막과 TTS에 남기지 않는다.
+
+    자주 쓰는 약칭은 한글 독음으로 바꾸고, 알 수 없는 한자는 글리프가 깨지는
+    것보다 누락이 안전하므로 제거한다. 새 대본에는 생성 프롬프트에서도 한자
+    사용을 금지하지만, 기존 저장 대본을 내보낼 때도 이 경계를 적용한다.
+    """
+
+    source = text or ""
+    for hanja, hangul in _HANJA_WORD_TO_HANGUL.items():
+        source = source.replace(hanja, hangul)
+    translated = source.translate(_HANJA_TO_HANGUL)
+    unknown_count = len(_HANJA_RE.findall(translated))
+    if unknown_count:
+        log.warning("자막에서 독음을 알 수 없는 한자 %d자를 제거했습니다.", unknown_count)
+        translated = _HANJA_RE.sub("", translated)
+    return re.sub(r"[ \t]+", " ", translated).strip()
+
 
 def _split_sentences(text: str) -> List[str]:
     """나레이션을 TTS 자연 발화 단위(문장/절)로 분할.
@@ -1366,27 +1431,101 @@ def _split_sentences(text: str) -> List[str]:
     return parts or [text]
 
 
-def _caption_pages(text: str, line_limit: int = 22) -> List[List[str]]:
-    """인용문을 보존하면서 한 화면당 최대 두 줄의 의미 단위로 묶는다."""
+def _split_caption_clauses(text: str) -> List[str]:
+    """따옴표 안은 보존하고 쉼표·쌍점 뒤에서 화면용 의미 절을 나눈다."""
 
-    normalized = re.sub(r"\s+", " ", (text or "").strip())
-    if not normalized:
-        return []
+    clauses: List[str] = []
+    start = 0
+    quote_end: Optional[str] = None
+    for index, char in enumerate(text):
+        if quote_end is not None:
+            if char == quote_end:
+                quote_end = None
+            continue
+        if char in _QUOTE_PAIRS:
+            quote_end = _QUOTE_PAIRS[char]
+            continue
+        if char in ",，、;；:":
+            clause = text[start:index + 1].strip()
+            if clause:
+                clauses.append(clause)
+            start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        clauses.append(tail)
+
+    # "근데,"처럼 지나치게 짧은 접속 절은 다음 절에 붙여 단독 줄을 막는다.
+    merged: List[str] = []
+    index = 0
+    while index < len(clauses):
+        clause = clauses[index]
+        if len(clause) <= 6 and index + 1 < len(clauses):
+            merged.append(f"{clause} {clauses[index + 1]}".strip())
+            index += 2
+        else:
+            merged.append(clause)
+            index += 1
+    return merged or [text]
+
+
+def _balanced_clause_lines(clause: str, hard_limit: int) -> List[str]:
+    """절을 최소 줄 수로, 같은 화면에서 읽기 편하게 균형 분할한다."""
+
     tokens = re.findall(
         r"""(?:"[^"]*"|'[^']*'|“[^”]*”|‘[^’]*’|\S+)""",
-        normalized,
+        clause,
     )
+    if not tokens:
+        return []
+    if len(clause) <= hard_limit:
+        return [clause]
+
+    # (줄 수, 줄 길이 편차, 여백 제곱합, 줄 목록) 기준의 동적 계획.
+    # 최소 줄 수를 우선한 뒤 앞줄만 길고 끝에 한두 글자가 남는 분할을 피한다.
+    memo: Dict[int, Optional[Tuple[int, int, int, List[str]]]] = {}
+
+    def solve(start: int) -> Optional[Tuple[int, int, int, List[str]]]:
+        if start >= len(tokens):
+            return (0, 0, 0, [])
+        if start in memo:
+            return memo[start]
+        candidates: List[Tuple[int, int, int, List[str]]] = []
+        for end in range(start + 1, len(tokens) + 1):
+            line = " ".join(tokens[start:end])
+            if len(line) > hard_limit and end > start + 1:
+                break
+            tail = solve(end)
+            if tail is None:
+                continue
+            lines = [line, *tail[3]]
+            lengths = [len(value) for value in lines]
+            candidates.append((
+                len(lines),
+                max(lengths) - min(lengths),
+                sum((hard_limit - min(length, hard_limit)) ** 2 for length in lengths),
+                lines,
+            ))
+        memo[start] = min(candidates, key=lambda item: item[:3]) if candidates else None
+        return memo[start]
+
+    result = solve(0)
+    return result[3] if result else [clause]
+
+
+def _caption_pages(text: str, line_limit: int = 22) -> List[List[str]]:
+    """문장부호와 의미 절을 보존해 한 화면당 최대 두 줄로 묶는다.
+
+    ``line_limit``는 권장 길이이고, 짧은 조사·어미 하나가 다음 줄로 고립되는
+    것을 막기 위해 두 글자까지 여유를 허용한다.
+    """
+
+    normalized = re.sub(r"\s+", " ", _caption_safe_korean(text))
+    if not normalized:
+        return []
     lines: List[str] = []
-    current = ""
-    for token in tokens:
-        candidate = f"{current} {token}".strip()
-        if current and len(candidate) > line_limit:
-            lines.append(current)
-            current = token
-        else:
-            current = candidate
-    if current:
-        lines.append(current)
+    hard_limit = line_limit + 2
+    for clause in _split_caption_clauses(normalized):
+        lines.extend(_balanced_clause_lines(clause, hard_limit))
     return [lines[index:index + 2] for index in range(0, len(lines), 2)]
 
 
@@ -1402,7 +1541,9 @@ def _plan_sentences(segments: List[Dict], cfg, tts_dir: Path,
     """
     sentences: List[Dict] = []
     for i, s in enumerate(segments):
-        nar = (s.get("narration") or s.get("caption") or "").strip()
+        nar = _caption_safe_korean(
+            (s.get("narration") or s.get("caption") or "").strip()
+        )
         for sent in _split_sentences(nar):
             sentences.append({"seg": i, "text": sent})
 

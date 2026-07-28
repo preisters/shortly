@@ -27,6 +27,7 @@ from shortly.core.use_cases.build_cut_manifest import build_cut_manifest
 from shortly.generate.capcut_export import (
     _build_photo_segment,
     _caption_pages,
+    _caption_safe_korean,
     _plan_sentences,
     _reference_asset_layout,
     _split_sentences,
@@ -279,6 +280,69 @@ class PersonalReviewAndExportTests(unittest.TestCase):
         self.assertEqual(
             first["start"] + first["dur"],
             second["start"] + second["dur"],
+        )
+
+    def test_caption_pages_follow_punctuation_and_balance_lines(self) -> None:
+        pages = _caption_pages(
+            "지도에서 섬 하나만 지우면 일본 시장이 열리는데, "
+            "그걸 걷어차버린 한국 제품이 있다고"
+        )
+
+        self.assertEqual(
+            pages,
+            [
+                [
+                    "지도에서 섬 하나만 지우면",
+                    "일본 시장이 열리는데,",
+                ],
+                ["그걸 걷어차버린 한국 제품이 있다고"],
+            ],
+        )
+
+    def test_caption_pages_do_not_leave_one_word_orphan(self) -> None:
+        self.assertEqual(
+            _caption_pages("회사가 대기업 인수 검토설까지 나왔다는 거"),
+            [["회사가 대기업 인수 검토설까지 나왔다는 거"]],
+        )
+
+    def test_caption_pages_pair_short_comma_clauses(self) -> None:
+        self.assertEqual(
+            _caption_pages(
+                "요즘 난리난 상하이 버터떡, "
+                "언론이 억지로 밀어버린 거라고 함"
+            ),
+            [[
+                "요즘 난리난 상하이 버터떡,",
+                "언론이 억지로 밀어버린 거라고 함",
+            ]],
+        )
+
+    def test_caption_safe_korean_converts_known_and_removes_unknown_hanja(self) -> None:
+        sanitized = _caption_safe_korean("日 수출과 龍 문양")
+
+        self.assertEqual(sanitized, "일본 수출과 문양")
+        self.assertNotRegex(
+            sanitized,
+            r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]",
+        )
+
+    def test_caption_plan_sanitizes_hanja_before_tts_and_rendering(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            plan = _plan_sentences(
+                [{"narration": "독도 포장지로 日 수출이 막혔다고"}],
+                None,
+                Path(temporary),
+            )
+
+        self.assertEqual(
+            plan["audios"][0]["text"],
+            "독도 포장지로 일본 수출이 막혔다고",
+        )
+        rendered = " ".join(item["text"] for item in plan["captions"])
+        self.assertIn("일본 수출", rendered)
+        self.assertNotRegex(
+            rendered,
+            r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]",
         )
 
     def test_capcut_segment_can_reference_generated_video(self) -> None:

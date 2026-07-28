@@ -38,6 +38,13 @@ def _guide() -> dict:
     }
 
 
+class _SavedGuideService:
+    def get_guide(self, channel: str, name: str) -> dict | None:
+        if channel != "@fixture" or name != "saved-guide":
+            return None
+        return {"guide": _guide()}
+
+
 class CutManifestTests(unittest.TestCase):
     def test_guide_conversion_is_versioned_and_does_not_mutate_input(self) -> None:
         guide = _guide()
@@ -93,6 +100,49 @@ class CutManifestTests(unittest.TestCase):
         self.assertEqual(
             response.json()["schema_version"], "shortly-cut-manifest-v1"
         )
+
+    @unittest.skipIf(TestClient is None, "FastAPI runtime unavailable")
+    def test_saved_guide_handoff_reuses_the_existing_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with isolated_shortly_env(
+                SHORTLY_USER_DATA=str(Path(temporary) / "state"),
+                SHORTLY_DATA_DIR=str(Path(temporary) / "data"),
+                SHORTLY_ARTIFACT_DIR=str(Path(temporary) / "artifacts"),
+            ):
+                app = create_personal_app(service_api=_SavedGuideService())
+                with TestClient(
+                    app, client=("127.0.0.1", 50000)
+                ) as client:
+                    first = client.post(
+                        "/api/personal/manifests/from-guide",
+                        json={
+                            "channel": "@fixture",
+                            "name": "saved-guide",
+                        },
+                    )
+                    second = client.post(
+                        "/api/personal/manifests/from-guide",
+                        json={
+                            "channel": "@fixture",
+                            "name": "saved-guide",
+                        },
+                    )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        first_body = first.json()
+        second_body = second.json()
+        self.assertFalse(first_body["reused"])
+        self.assertTrue(second_body["reused"])
+        self.assertEqual(
+            first_body["manifest"]["manifest_id"],
+            second_body["manifest"]["manifest_id"],
+        )
+        self.assertEqual(
+            first_body["manifest"]["metadata"]["source_channel"],
+            "@fixture",
+        )
+        self.assertEqual(first_body["guide"]["title"], "fixture")
 
 
 if __name__ == "__main__":

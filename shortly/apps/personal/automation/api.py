@@ -36,6 +36,11 @@ class ManifestRequest(BaseModel):
     overrides: dict[str, str] = Field(default_factory=dict)
 
 
+class SavedGuideManifestRequest(BaseModel):
+    channel: str
+    name: str
+
+
 class CutTypeRequest(BaseModel):
     asset_type: str
 
@@ -108,6 +113,8 @@ def create_router(
     settings: PersonalAutomationSettings,
     store: AutomationStore,
     executor: AssetJobExecutor,
+    *,
+    service_api: Any,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -148,6 +155,40 @@ def create_router(
             )
             store.save_manifest(manifest)
             return manifest.to_dict()
+        except Exception as exc:
+            raise _error(exc) from exc
+
+    @router.post("/api/personal/manifests/from-guide")
+    def create_manifest_from_saved_guide(
+        body: SavedGuideManifestRequest,
+    ) -> dict:
+        try:
+            saved = service_api.get_guide(body.channel, body.name)
+            if saved is None:
+                raise KeyError("저장된 가이드를 찾을 수 없습니다.")
+            guide = saved.get("guide")
+            if not isinstance(guide, dict) or not guide.get("segments"):
+                raise ValueError("저장된 가이드에 유효한 컷 정보가 없습니다.")
+
+            candidate = build_cut_manifest(guide)
+            manifest = store.find_manifest_by_source_hash(
+                candidate.source_guide_hash
+            )
+            reused = manifest is not None
+            if manifest is None:
+                manifest = candidate
+                manifest.metadata.update(
+                    {
+                        "source_channel": body.channel,
+                        "source_guide_name": body.name,
+                    }
+                )
+                store.save_manifest(manifest)
+            return {
+                "manifest": manifest.to_dict(),
+                "guide": guide,
+                "reused": reused,
+            }
         except Exception as exc:
             raise _error(exc) from exc
 

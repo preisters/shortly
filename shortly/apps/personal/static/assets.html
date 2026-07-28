@@ -21,6 +21,7 @@
   <p class="muted">유료 생성은 작업 생성 → 비용 확인 → 승인 → 실행 순서로만 진행됩니다.</p>
   <section>
     <h2>1. CutManifest 생성</h2>
+    <p id="source-status" class="muted">저장된 가이드에서 열거나 guide JSON을 직접 붙여 넣으세요.</p>
     <textarea id="guide" placeholder="기존 guide JSON을 붙여 넣으세요"></textarea>
     <div class="row"><button id="manifest-create">컷 명세 생성</button><span id="manifest-id"></span></div>
   </section>
@@ -55,15 +56,18 @@
       if(!response.ok) throw new Error(body.detail||response.statusText);
       return body;
     }
+    function escapeHtml(value){
+      return String(value||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    }
     function show(value){result.textContent=JSON.stringify(value,null,2)}
     function render(){
       document.querySelector("#manifest-id").textContent=manifest?.manifest_id||"";
       const target=document.querySelector("#cuts");
       if(!manifest){target.textContent="컷 명세를 먼저 생성하세요.";return}
       target.innerHTML="<table><thead><tr><th>컷</th><th>프롬프트</th><th>유형</th><th>상태</th><th>실행</th></tr></thead><tbody>"+
-        manifest.cuts.map(c=>`<tr><td>${c.id}</td><td>${c.prompt||""}</td><td><select data-cut="${c.id}">
+        manifest.cuts.map(c=>`<tr><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.prompt)}</td><td><select data-cut="${escapeHtml(c.id)}">
         ${["real_image","stock_image","generated_image","generated_video","meme","screenshot","manual_required"].map(v=>`<option ${v===c.asset_type?"selected":""}>${v}</option>`).join("")}
-        </select></td><td>${c.selected_candidate_id?"선택됨":"대기"}</td><td>${c.asset_type.startsWith("generated_")?`<button data-generate="${c.id}">비용 확인·생성</button>`:"수동/검색"}</td></tr>`).join("")+"</tbody></table>";
+        </select></td><td>${c.selected_candidate_id?"선택됨":"대기"}</td><td>${c.asset_type.startsWith("generated_")?`<button data-generate="${escapeHtml(c.id)}">비용 확인·생성</button>`:"수동/검색"}</td></tr>`).join("")+"</tbody></table>";
       target.querySelectorAll("select").forEach(el=>el.onchange=async()=>{
         try{await api(`/api/personal/manifests/${manifest.manifest_id}/cuts/${el.dataset.cut}`,{method:"PATCH",body:JSON.stringify({asset_type:el.value})});manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);render()}catch(e){result.textContent=e.message}
       });
@@ -97,6 +101,34 @@
       if(!confirm("검증된 에셋으로 새 CapCut 프로젝트를 생성할까요?")) return;
       show(await api("/api/personal/exports/commit",{method:"POST",body:JSON.stringify({plan_path:preparedExport.plan_path})}))
     }catch(e){result.textContent=e.message}};
+    async function loadSavedGuideHandoff(){
+      const params=new URLSearchParams(window.location.search);
+      const channel=params.get("channel"), name=params.get("name"), manifestId=params.get("manifest_id");
+      if(!channel||!name){
+        if(manifestId){
+          try{manifest=await api(`/api/personal/manifests/${encodeURIComponent(manifestId)}`);render();show(manifest)}
+          catch(e){result.textContent=e.message}
+        }
+        return;
+      }
+      const sourceStatus=document.querySelector("#source-status");
+      sourceStatus.textContent=`저장된 가이드 불러오는 중: ${channel} / ${name}`;
+      try{
+        const imported=await api("/api/personal/manifests/from-guide",{method:"POST",body:JSON.stringify({channel,name})});
+        manifest=imported.manifest;
+        document.querySelector("#guide").value=JSON.stringify(imported.guide,null,2);
+        sourceStatus.textContent=`저장된 가이드 연결됨: ${channel} / ${name}${imported.reused?" · 기존 작업 재개":" · 새 작업"}`;
+        const next=new URL(window.location.href);
+        next.searchParams.set("manifest_id",manifest.manifest_id);
+        window.history.replaceState({}, "", next);
+        render();
+        show({source:{channel,name,reused:imported.reused},manifest});
+      }catch(e){
+        sourceStatus.className="error";
+        sourceStatus.textContent=`저장된 가이드를 불러오지 못했습니다: ${e.message}`;
+      }
+    }
+    loadSavedGuideHandoff();
   </script>
 </body>
 </html>

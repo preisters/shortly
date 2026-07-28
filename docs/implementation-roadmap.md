@@ -13,6 +13,9 @@
 > 기준으로 한다. 포터블 완성도 개선은 사용자 결정에 따라 후순위다.
 > 실제 OpenAI·Google·Anthropic 및 CapCut 정적 smoke 결과는
 > [`provider-capcut-smoke-report.md`](provider-capcut-smoke-report.md)를 참조한다.
+> 2026-07-28 CapCut 화면 재생·저장·재열기 수동 검수까지 완료했다. 다음 사용성
+> 단위로 저장된 가이드에서 개인 CutManifest를 직접 열고 기존 작업을 재개하는
+> handoff를 구현했다.
 
 ## 1. 구현 원칙
 

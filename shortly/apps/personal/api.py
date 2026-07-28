@@ -6,6 +6,7 @@ import os
 import ipaddress
 from typing import Any, Optional
 
+from ... import service as default_service
 from ...product_profile import ProductKind
 
 
@@ -19,7 +20,12 @@ def create_app(*, service_api: Optional[Any] = None):
     automation_settings, store, executor = create_automation_components()
     # Extend concrete routes so route manifests and artifact-boundary tests can
     # inspect the personal surface on FastAPI versions that defer include_router.
-    automation_router = create_router(automation_settings, store, executor)
+    automation_router = create_router(
+        automation_settings,
+        store,
+        executor,
+        service_api=service_api if service_api is not None else default_service,
+    )
     app.router.routes.extend(automation_router.routes)
     app.state.personal_automation = {
         "settings": automation_settings,

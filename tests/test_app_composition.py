@@ -61,8 +61,16 @@ class AppCompositionTests(unittest.TestCase):
         personal_routes = set(route_manifest(personal))
         self.assertTrue(legacy_routes.issubset(personal_routes))
         self.assertIn(("POST", "/api/personal/manifests"), personal_routes)
+        self.assertIn(
+            ("POST", "/api/personal/manifests/from-guide"),
+            personal_routes,
+        )
         self.assertNotIn(
             ("POST", "/api/personal/manifests"),
+            set(route_manifest(team)),
+        )
+        self.assertNotIn(
+            ("POST", "/api/personal/manifests/from-guide"),
             set(route_manifest(team)),
         )
         self.assertNotIn(("GET", "/api/local-models"), route_manifest(team))

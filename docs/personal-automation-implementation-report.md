@@ -119,14 +119,16 @@ python -m shortly.apps.personal.launcher
 OpenAI 이미지, Google 영상, Anthropic 최소 텍스트 호출과 CapCut 새 프로젝트 생성,
 정적 사후 검증까지 성공했다.
 
-아직 필요한 확인:
+2026-07-28 사용자가 CapCut에서 `Shortly Provider Smoke 20260728`의 이미지·영상·
+자막 재생과 저장 후 재열기를 확인했다. 따라서 공급자 생성부터 CapCut 프로젝트
+열기까지의 첫 실제 E2E smoke는 완료로 판단한다.
 
-1. CapCut에서 `Shortly Provider Smoke 20260728`을 직접 열어 이미지·영상·자막을
-   재생하고 저장 후 다시 연다.
-2. 각 공급자 dashboard에서 실제 청구액을 확인하고 예상 비용 기본값을 조정한다.
-3. 영상이 4MB를 넘어 inline 응답이 부적절하면 Google URI delivery와 files polling을
+아직 필요한 운영 확인:
+
+1. 각 공급자 dashboard에서 실제 청구액을 확인하고 예상 비용 기본값을 조정한다.
+2. 영상이 4MB를 넘어 inline 응답이 부적절하면 Google URI delivery와 files polling을
    별도 PR로 구현한다.
-4. 기본 예상 비용과 편당·일간·월간 상한은 실제 5~10편 사용 후 조정한다.
+3. 기본 예상 비용과 편당·일간·월간 상한은 실제 5~10편 사용 후 조정한다.
 
 ## 7. 공식 API 기준
 
@@ -142,8 +144,10 @@ OpenAI 이미지, Google 영상, Anthropic 최소 텍스트 호출과 CapCut 새
 
 ## 8. 남은 후속 작업
 
-후순위가 아닌 다음 작업은 실제 공급자와 CapCut의 제한된 수동 smoke test다. 그
-결과에 따라 adapter 응답 파싱과 CapCut material fixture만 좁게 수정한다.
+실제 공급자와 CapCut의 제한된 smoke test는 완료했다. 다음 사용성 단계로 저장된
+가이드 화면에서 개인 에셋 자동화 콘솔로 직접 이동하고, 동일한 가이드의 기존
+CutManifest를 재사용하는 연결을 구현했다. 이 연결은 가이드 복사·붙여넣기를 없애되
+유료 생성 승인과 CapCut 2단계 커밋 경계를 변경하지 않는다.
 
 다음은 명시적으로 후순위다.
 

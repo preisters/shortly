@@ -14,7 +14,7 @@ from ..domain.assets import (
     MediaKind,
 )
 
-ASSET_CLASSIFIER_VERSION = 2
+ASSET_CLASSIFIER_VERSION = 3
 
 _FACT_TERMS = (
     "실제",
@@ -84,6 +84,27 @@ _STOCK_TERMS = (
     "stock",
     "archive",
 )
+_RECREATION_TERMS = (
+    "연상",
+    "재현",
+    "상황극",
+    "가상의",
+    "가상 인물",
+    "모의",
+    "드라마타이즈",
+    "reenact",
+    "recreation",
+)
+_EXACT_SOURCE_TERMS = (
+    "실제",
+    "실물",
+    "원본",
+    "제품",
+    "로고",
+    "브랜드",
+    "포장지",
+    "공식",
+)
 
 
 def _pick(items: Any, index: int) -> str:
@@ -91,6 +112,12 @@ def _pick(items: Any, index: int) -> str:
     if not values:
         return ""
     return values[index] if index < len(values) else values[-1]
+
+
+def _pick_exact(items: Any, index: int) -> Any:
+    if not isinstance(items, (list, tuple)) or index >= len(items):
+        return None
+    return items[index]
 
 
 def _contains(text: str, terms: tuple[str, ...]) -> bool:
@@ -114,6 +141,12 @@ def classify_asset_type(
         if fact_sensitive is None
         else bool(fact_sensitive)
     )
+    if (
+        fact_sensitive is None
+        and _contains(prompt, _RECREATION_TERMS)
+        and not _contains(prompt, _EXACT_SOURCE_TERMS)
+    ):
+        is_fact_sensitive = False
     notes: list[str] = []
     if _contains(combined, _SCREENSHOT_TERMS):
         notes.append("원본 화면을 직접 캡처해야 하는 컷입니다.")
@@ -184,12 +217,83 @@ def build_cut_manifest(
             cut_id = f"s{segment_index:03d}-c{cut_index:02d}"
             prompt = _pick(segment.get("image_suggestions"), cut_index)
             media_hint = _pick(segment.get("media_suggestions"), cut_index)
-            asset_type, media_kind, fact_sensitive, notes = classify_asset_type(
-                prompt=prompt,
-                media_hint=media_hint,
-                narration=str(segment.get("narration") or ""),
-                fact_sensitive=segment.get("fact_sensitive"),
+            model_asset_type = _pick_exact(
+                segment.get("asset_type_suggestions"),
+                cut_index,
             )
+            model_fact_sensitive = _pick_exact(
+                segment.get("fact_sensitive_suggestions"),
+                cut_index,
+            )
+            model_reason = _pick_exact(
+                segment.get("asset_reason_suggestions"),
+                cut_index,
+            )
+            try:
+                recommended_type = AssetType(model_asset_type)
+            except (TypeError, ValueError):
+                recommended_type = None
+            if (
+                recommended_type is not None
+                and isinstance(model_fact_sensitive, bool)
+            ):
+                fact_sensitive = model_fact_sensitive
+                asset_type = recommended_type
+                media_kind = (
+                    MediaKind.VIDEO
+                    if asset_type is AssetType.GENERATED_VIDEO
+                    or (
+                        asset_type is AssetType.MANUAL_REQUIRED
+                        and _contains(media_hint, _VIDEO_TERMS)
+                    )
+                    else MediaKind.IMAGE
+                )
+                notes = [
+                    "생성 모델 판단: "
+                    + (
+                        str(model_reason).strip()
+                        if model_reason
+                        else "컷 문맥과 에셋 확보 가능성을 기준으로 분류했습니다."
+                    )
+                ]
+                exact_source_required = (
+                    _contains(prompt, _EXACT_SOURCE_TERMS)
+                    and not _contains(
+                        prompt,
+                        _RECREATION_TERMS + _GENERATED_TERMS,
+                    )
+                )
+                if (
+                    asset_type
+                    in (
+                        AssetType.GENERATED_IMAGE,
+                        AssetType.GENERATED_VIDEO,
+                    )
+                    and (fact_sensitive or exact_source_required)
+                ):
+                    asset_type, media_kind, fact_sensitive, fallback_notes = (
+                        classify_asset_type(
+                            prompt=prompt,
+                            media_hint=media_hint,
+                            narration=str(segment.get("narration") or ""),
+                            fact_sensitive=True,
+                        )
+                    )
+                    notes.extend(
+                        [
+                            "생성 모델의 사실성 판정과 생성 유형이 충돌해 안전 규칙으로 차단했습니다.",
+                            *fallback_notes,
+                        ]
+                    )
+            else:
+                asset_type, media_kind, fact_sensitive, notes = (
+                    classify_asset_type(
+                        prompt=prompt,
+                        media_hint=media_hint,
+                        narration=str(segment.get("narration") or ""),
+                        fact_sensitive=segment.get("fact_sensitive"),
+                    )
+                )
             if cut_id in overrides:
                 asset_type = AssetType(overrides[cut_id])
                 media_kind = (

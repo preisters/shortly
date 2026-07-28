@@ -129,6 +129,14 @@ def render_guide_markdown(guide: Dict) -> str:
             lines.append(f"- 이미지 추천: {', '.join(s['image_suggestions'])}")
         if s.get("media_suggestions"):
             lines.append(f"- 매체: {', '.join(s['media_suggestions'])}")
+        if s.get("asset_type_suggestions"):
+            lines.append(
+                f"- 에셋 유형: {', '.join(s['asset_type_suggestions'])}"
+            )
+        if s.get("asset_reason_suggestions"):
+            lines.append(
+                f"- 에셋 판단: {' / '.join(s['asset_reason_suggestions'])}"
+            )
         if s.get("effect_suggestions"):
             lines.append(f"- 효과 추천: {', '.join(s['effect_suggestions'])}")
     g = guide.get("global_notes", {})

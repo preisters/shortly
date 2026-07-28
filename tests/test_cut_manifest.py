@@ -9,6 +9,8 @@ from shortly.core.use_cases.build_cut_manifest import (
     build_cut_manifest,
     classify_asset_type,
 )
+from shortly.generate.image_reco import recommend_cuts
+from shortly.llm.base import LLMClient
 from support import isolated_shortly_env
 
 try:
@@ -43,6 +45,35 @@ class _SavedGuideService:
         if channel != "@fixture" or name != "saved-guide":
             return None
         return {"guide": _guide()}
+
+
+class _AssetDirectorLlm(LLMClient):
+    available = True
+    text_model = "fixture-generation-model"
+
+    def complete_json(self, *args, **kwargs):
+        return {
+            "segments": [
+                {
+                    "index": 0,
+                    "image_suggestions": [
+                        "일본 바이어 협상 장면 재현",
+                        "실제 제품 포장 사진",
+                    ],
+                    "media_suggestions": ["사진", "사진"],
+                    "effect_suggestions": ["줌 인", "없음"],
+                    "asset_type_suggestions": [
+                        "generated_image",
+                        "real_image",
+                    ],
+                    "fact_sensitive_suggestions": [False, True],
+                    "asset_reason_suggestions": [
+                        "실제 기록사진이 아닌 협상 상황 재현 장면",
+                        "실제 포장 외형과 문구가 정확해야 함",
+                    ],
+                }
+            ]
+        }
 
 
 class CutManifestTests(unittest.TestCase):
@@ -105,6 +136,81 @@ class CutManifestTests(unittest.TestCase):
         self.assertEqual(media, MediaKind.VIDEO)
         self.assertFalse(fact_sensitive)
         self.assertIn("AI 영상", notes[0])
+
+    def test_recreated_people_scene_is_not_treated_as_real_portrait(self) -> None:
+        asset_type, media, fact_sensitive, notes = classify_asset_type(
+            prompt="일본 바이어 미팅 또는 협상 장면 연상 인물 사진",
+            media_hint="사진",
+            narration="실제 협상 일화를 설명한다",
+        )
+        self.assertEqual(asset_type, AssetType.GENERATED_IMAGE)
+        self.assertEqual(media, MediaKind.IMAGE)
+        self.assertFalse(fact_sensitive)
+        self.assertIn("AI 이미지", notes[0])
+
+    def test_generation_llm_classification_has_priority(self) -> None:
+        guide = {
+            "title": "fixture",
+            "total_duration_sec": 4,
+            "segments": [
+                {
+                    "index": 0,
+                    "start_sec": 0,
+                    "duration_sec": 4,
+                    "narration": "실제 사건을 두 컷으로 설명한다",
+                    "caption": "협상과 제품",
+                    "cuts_suggested": 2,
+                }
+            ],
+        }
+        classified = recommend_cuts(
+            _AssetDirectorLlm(),
+            {"image_style": {}, "editing_style": {}},
+            guide,
+        )
+        manifest = build_cut_manifest(classified)
+
+        self.assertEqual(
+            classified["segments"][0]["asset_classification_source"],
+            "generation_llm",
+        )
+        self.assertEqual(
+            manifest.cuts[0].asset_type,
+            AssetType.GENERATED_IMAGE,
+        )
+        self.assertFalse(manifest.cuts[0].fact_sensitive)
+        self.assertEqual(
+            manifest.cuts[1].asset_type,
+            AssetType.REAL_IMAGE,
+        )
+        self.assertTrue(manifest.cuts[1].fact_sensitive)
+        self.assertIn("생성 모델 판단", manifest.cuts[0].notes[0])
+
+    def test_exact_product_source_overrides_unsafe_model_generation(self) -> None:
+        guide = {
+            "title": "fixture",
+            "total_duration_sec": 2,
+            "segments": [
+                {
+                    "index": 0,
+                    "start_sec": 0,
+                    "duration_sec": 2,
+                    "narration": "실제 제품을 소개한다",
+                    "caption": "제품",
+                    "cuts_suggested": 1,
+                    "image_suggestions": ["실제 제품 포장지 클로즈업 사진"],
+                    "media_suggestions": ["사진"],
+                    "asset_type_suggestions": ["generated_image"],
+                    "fact_sensitive_suggestions": [False],
+                    "asset_reason_suggestions": ["생성 이미지가 편리함"],
+                }
+            ],
+        }
+        cut = build_cut_manifest(guide).cuts[0]
+
+        self.assertEqual(cut.asset_type, AssetType.REAL_IMAGE)
+        self.assertTrue(cut.fact_sensitive)
+        self.assertTrue(any("안전 규칙" in note for note in cut.notes))
 
     def test_explicit_override_is_recorded(self) -> None:
         manifest = build_cut_manifest(

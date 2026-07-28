@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from ....config import get_settings
@@ -352,6 +352,48 @@ def create_router(
                 cut_id=cut_id,
                 candidate_id=body.candidate_id,
                 reason=body.reason,
+            )
+        except Exception as exc:
+            raise _error(exc) from exc
+
+    @router.get(
+        "/api/personal/manifests/{manifest_id}/cuts/{cut_id}/preview"
+    )
+    def preview_selected_asset(manifest_id: str, cut_id: str):
+        try:
+            cut = store.load_manifest(manifest_id).cut(cut_id)
+            candidate = cut.selected_candidate
+            if candidate is None:
+                raise KeyError("선택된 에셋이 없습니다.")
+            original = Path(candidate.original_path or "")
+            prepared = Path(candidate.prepared_path or "")
+            source = (
+                original
+                if original.is_file()
+                else prepared
+                if prepared.is_file()
+                else None
+            )
+            if source is None:
+                raise KeyError("미리보기 파일을 찾을 수 없습니다.")
+            resolved = source.resolve()
+            allowed_root = settings.assets_dir.resolve()
+            if allowed_root not in resolved.parents:
+                raise ValueError("개인 에셋 폴더 밖의 파일은 표시할 수 없습니다.")
+            media_types = {
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".webp": "image/webp",
+                ".mp4": "video/mp4",
+            }
+            media_type = media_types.get(resolved.suffix.lower())
+            if media_type is None:
+                raise ValueError("미리보기를 지원하지 않는 파일 형식입니다.")
+            return FileResponse(
+                str(resolved),
+                media_type=media_type,
+                headers={"Cache-Control": "private, max-age=60"},
             )
         except Exception as exc:
             raise _error(exc) from exc

@@ -9,13 +9,21 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from fastapi.testclient import TestClient
+from shortly.apps.personal.api import create_app as create_personal_app
 from shortly.apps.personal.automation.stock_search import (
     OpenverseStockService,
     _validate_public_https_url,
 )
 from shortly.apps.personal.automation.store import AutomationStore
-from shortly.core.domain.assets import AssetType, CandidateStatus
+from shortly.core.domain.assets import (
+    AssetCandidate,
+    AssetType,
+    CandidateStatus,
+    MediaKind,
+)
 from shortly.core.use_cases.build_cut_manifest import build_cut_manifest
+from support import isolated_shortly_env
 
 
 _RESULT_ID = "123e4567-e89b-42d3-a456-426614174000"
@@ -158,6 +166,80 @@ class StockSearchTests(unittest.TestCase):
                 result["candidate"]["id"],
                 saved_cut.selected_candidate_id,
             )
+
+    def test_selected_asset_preview_serves_only_personal_asset_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with isolated_shortly_env(
+                SHORTLY_USER_DATA=str(root / "state"),
+                SHORTLY_DATA_DIR=str(root / "data"),
+                SHORTLY_ARTIFACT_DIR=str(root / "artifacts"),
+            ):
+                app = create_personal_app()
+                automation = app.state.personal_automation
+                store = automation["store"]
+                assets_dir = automation["settings"].assets_dir
+                manifest = build_cut_manifest(
+                    {
+                        "title": "fixture",
+                        "segments": [
+                            {
+                                "index": 0,
+                                "duration_sec": 2,
+                                "image_suggestions": ["자료 이미지"],
+                            }
+                        ],
+                    }
+                )
+                cut = manifest.cuts[0]
+                preview = (
+                    assets_dir
+                    / manifest.manifest_id
+                    / cut.id
+                    / "selected.jpg"
+                )
+                preview.parent.mkdir(parents=True)
+                preview.write_bytes(_jpeg_bytes())
+                candidate = AssetCandidate(
+                    provider="fixture",
+                    model="fixture",
+                    media_kind=MediaKind.IMAGE,
+                    status=CandidateStatus.SELECTED,
+                    original_path=str(preview),
+                    prepared_path=str(preview),
+                    mime_type="image/jpeg",
+                )
+                cut.candidates.append(candidate)
+                cut.selected_candidate_id = candidate.id
+                store.save_manifest(manifest)
+
+                with TestClient(
+                    app,
+                    client=("127.0.0.1", 50000),
+                ) as client:
+                    response = client.get(
+                        f"/api/personal/manifests/{manifest.manifest_id}"
+                        f"/cuts/{cut.id}/preview"
+                    )
+
+                outside = root / "outside.jpg"
+                outside.write_bytes(_jpeg_bytes())
+                candidate.original_path = str(outside)
+                candidate.prepared_path = str(outside)
+                store.save_manifest(manifest)
+                with TestClient(
+                    app,
+                    client=("127.0.0.1", 50000),
+                ) as client:
+                    blocked = client.get(
+                        f"/api/personal/manifests/{manifest.manifest_id}"
+                        f"/cuts/{cut.id}/preview"
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "image/jpeg")
+        self.assertTrue(response.content.startswith(b"\xff\xd8"))
+        self.assertEqual(blocked.status_code, 400)
 
 
 if __name__ == "__main__":

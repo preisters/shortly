@@ -14,7 +14,8 @@
     button:disabled{opacity:.55;cursor:not-allowed}
     .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.muted{color:#a7abba}.error{color:#ff8e8e}
     .asset-guide{line-height:1.6;color:#c9ccda}.asset-guide b{color:#fff}
-    .reason{min-width:220px;color:#b9bdca;font-size:13px;line-height:1.45}
+    #cuts{overflow-x:auto}.reason{width:190px;max-width:190px;color:#b9bdca;font-size:13px;line-height:1.45}
+    .reason-text{display:-webkit-box;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:3}
     .fact{display:inline-block;margin-top:4px;padding:2px 6px;border-radius:4px;background:#5b3030;color:#ffd1d1;font-size:11px}
     .state{font-weight:700;white-space:nowrap}.state-running{color:#ffd66b}.state-completed{color:#79e2a7}.state-failed{color:#ff8e8e}
     .spinner{display:inline-block;width:12px;height:12px;margin-right:6px;border:2px solid #73798f;border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}
@@ -29,6 +30,8 @@
     .stock-card img{width:100%;aspect-ratio:4/3;object-fit:cover;background:#090a0e;border-radius:7px}.stock-card strong{overflow-wrap:anywhere}.stock-card small{color:#aeb2c1;line-height:1.4}
     .stock-card button{margin-top:auto}.license-badge{display:inline-block;width:max-content;padding:2px 6px;border-radius:4px;background:#264b3c;color:#baf2d3;font-size:11px}
     .stock-pagination{display:flex;justify-content:center;align-items:center;gap:10px;margin-top:16px}.stock-empty{grid-column:1/-1;padding:36px;text-align:center;color:#a7abba}
+    .asset-preview{width:142px;min-width:142px}.asset-preview img,.asset-preview video{display:block;width:136px;height:104px;object-fit:contain;background:#090a0e;border:1px solid #3a3e50;border-radius:8px}
+    .asset-preview a{display:block}.preview-empty{display:flex;width:136px;height:104px;align-items:center;justify-content:center;box-sizing:border-box;border:1px dashed #3a3e50;border-radius:8px;color:#777c8d;font-size:12px;text-align:center}
   </style>
 </head>
 <body>
@@ -105,13 +108,13 @@
     let jobRefreshTimer=null;
     const assetTypes=["real_image","stock_image","generated_image","generated_video","meme","screenshot","manual_required"];
     const assetLabels={
-      real_image:"실제 이미지 · 직접 확보",
-      stock_image:"스톡 이미지 · 검색/삽입",
-      generated_image:"AI 이미지 생성 · 권장",
-      generated_video:"AI 영상 생성 · 권장",
-      meme:"밈/짤 · 직접 선택",
-      screenshot:"스크린샷 · 직접 캡처",
-      manual_required:"수동 삽입 필요 · AI 비권장"
+      real_image:"실제 이미지",
+      stock_image:"스톡 이미지",
+      generated_image:"AI 이미지",
+      generated_video:"AI 영상",
+      meme:"밈/짤",
+      screenshot:"스크린샷",
+      manual_required:"수동 삽입"
     };
     const result=document.querySelector("#result");
     async function api(path,options={}){
@@ -130,6 +133,24 @@
       }catch(_error){return ""}
     }
     function show(value){result.textContent=JSON.stringify(value,null,2)}
+    function selectedCandidate(cut){
+      return (cut.candidates||[]).find(candidate=>candidate.id===cut.selected_candidate_id)||null;
+    }
+    function compactReason(cut){
+      const notes=(cut.notes||[])
+        .map(note=>String(note||"").replace(/^생성 모델 판단\s*[:：]\s*/,"").trim())
+        .filter(Boolean);
+      return notes.join(" ")||"판정 근거 없음";
+    }
+    function previewMarkup(cut){
+      const candidate=selectedCandidate(cut);
+      if(!candidate) return '<div class="preview-empty">선택된 에셋 없음</div>';
+      const source=`/api/personal/manifests/${encodeURIComponent(manifest.manifest_id)}/cuts/${encodeURIComponent(cut.id)}/preview?v=${encodeURIComponent(candidate.id)}`;
+      if(candidate.media_kind==="video"){
+        return `<video src="${escapeHtml(source)}" controls muted preload="metadata" aria-label="${escapeHtml(cut.id)} 영상 미리보기"></video>`;
+      }
+      return `<a href="${escapeHtml(source)}" target="_blank" title="원본 크기로 열기"><img src="${escapeHtml(source)}" alt="${escapeHtml(cut.id)} 선택 이미지 미리보기" loading="lazy"></a>`;
+    }
     function statusLabel(cut){
       const state=cutStates.get(cut.id);
       if(state?.status==="running"||state?.status==="submitted"){
@@ -228,10 +249,10 @@
       document.querySelector("#manifest-id").textContent=manifest?.manifest_id||"";
       const target=document.querySelector("#cuts");
       if(!manifest){target.textContent="컷 명세를 먼저 생성하세요.";updateBatchControls();return}
-      target.innerHTML="<table><thead><tr><th>컷</th><th>프롬프트</th><th>권장 유형</th><th>판정 이유</th><th>상태</th><th>실행</th></tr></thead><tbody>"+
+      target.innerHTML="<table><thead><tr><th>컷</th><th>프롬프트</th><th>유형</th><th>판정 이유</th><th>미리보기</th><th>상태</th><th>실행</th></tr></thead><tbody>"+
         manifest.cuts.map(c=>`<tr><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.prompt)}</td><td><select data-cut="${escapeHtml(c.id)}" ${batchRunning?"disabled":""}>
         ${assetTypes.map(v=>`<option value="${v}" ${v===c.asset_type?"selected":""}>${assetLabels[v]}</option>`).join("")}
-        </select></td><td class="reason">${escapeHtml((c.notes||[]).join(" "))}${c.fact_sensitive?'<br><span class="fact">사실성 보호</span>':""}</td><td data-cut-status="${escapeHtml(c.id)}">${statusLabel(c)}</td><td>${c.asset_type.startsWith("generated_")?`<button data-generate="${escapeHtml(c.id)}" ${batchRunning?"disabled":""}>비용 확인·생성</button>`:c.asset_type==="stock_image"?`<button class="secondary" data-stock-search="${escapeHtml(c.id)}">${c.selected_candidate_id?"스톡 이미지 변경":"무료 스톡 검색"}</button>`:c.asset_type==="real_image"?"원본 직접 확보":"수동 처리"}</td></tr>`).join("")+"</tbody></table>";
+        </select></td><td class="reason" title="${escapeHtml(compactReason(c))}"><span class="reason-text">${escapeHtml(compactReason(c))}</span>${c.fact_sensitive?'<span class="fact">사실성 보호</span>':""}</td><td class="asset-preview">${previewMarkup(c)}</td><td data-cut-status="${escapeHtml(c.id)}">${statusLabel(c)}</td><td>${c.asset_type.startsWith("generated_")?`<button data-generate="${escapeHtml(c.id)}" ${batchRunning?"disabled":""}>비용 확인·생성</button>`:c.asset_type==="stock_image"?`<button class="secondary" data-stock-search="${escapeHtml(c.id)}">${c.selected_candidate_id?"스톡 이미지 변경":"무료 스톡 검색"}</button>`:c.asset_type==="real_image"?"원본 직접 확보":"수동 처리"}</td></tr>`).join("")+"</tbody></table>";
       target.querySelectorAll("select").forEach(el=>el.onchange=async()=>{
         try{await api(`/api/personal/manifests/${manifest.manifest_id}/cuts/${el.dataset.cut}`,{method:"PATCH",body:JSON.stringify({asset_type:el.value})});preparedExport=null;manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);render()}catch(e){result.textContent=e.message}
       });

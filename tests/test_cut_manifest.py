@@ -104,6 +104,14 @@ class CutManifestTests(unittest.TestCase):
         self.assertIn("/stock-search?", page)
         self.assertIn("/stock-select", page)
         self.assertIn("CC BY 결과도 포함", page)
+        self.assertIn("<th>미리보기</th>", page)
+        self.assertIn("/preview?v=", page)
+        self.assertIn("AI 이미지", page)
+        self.assertNotIn("AI 이미지 생성 · 권장", page)
+        self.assertIn(
+            'replace(/^생성 모델 판단\\s*[:：]\\s*/,"")',
+            page,
+        )
 
     def test_guide_conversion_is_versioned_and_does_not_mutate_input(self) -> None:
         guide = _guide()

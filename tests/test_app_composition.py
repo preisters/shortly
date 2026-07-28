@@ -120,6 +120,13 @@ class AppCompositionTests(unittest.TestCase):
             ),
             personal_routes,
         )
+        self.assertIn(
+            (
+                "GET",
+                "/api/personal/manifests/{manifest_id}/cuts/{cut_id}/preview",
+            ),
+            personal_routes,
+        )
         self.assertNotIn(
             ("POST", "/api/personal/manifests"),
             set(route_manifest(team)),

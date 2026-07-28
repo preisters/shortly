@@ -160,6 +160,49 @@ class PersonalReviewAndExportTests(unittest.TestCase):
             )
             self.assertEqual(list(capcut.iterdir()), [])
 
+    def test_prepare_export_blocks_unselected_stock_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = AutomationStore(root / "automation.sqlite3")
+            manifest = build_cut_manifest(
+                {
+                    "title": "fixture",
+                    "segments": [
+                        {
+                            "index": 0,
+                            "duration_sec": 1,
+                            "image_suggestions": ["시장 자료 사진"],
+                        }
+                    ],
+                }
+            )
+            cut = manifest.cuts[0]
+            cut.asset_type = AssetType.STOCK_IMAGE
+            store.save_manifest(manifest)
+            capcut = root / "capcut"
+            capcut.mkdir()
+
+            with patch(
+                "shortly.apps.personal.automation.capcut_assets.find_capcut_draft_root",
+                return_value=capcut,
+            ), patch(
+                "shortly.apps.personal.automation.capcut_assets._find_template_project",
+                return_value=capcut / "template",
+            ), patch(
+                "shortly.apps.personal.automation.capcut_assets._pick_templates",
+                return_value=({}, {}, {}),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    cut.id,
+                ):
+                    prepare_export(
+                        store=store,
+                        manifest_id=manifest.manifest_id,
+                        guide={"title": "fixture", "segments": []},
+                        staging_root=root / "staging",
+                    )
+
     def test_commit_export_reuses_template_tts_and_selected_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

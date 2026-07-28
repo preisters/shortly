@@ -4,7 +4,13 @@ import unittest
 import tempfile
 from pathlib import Path
 
-from shortly.core.domain.assets import AssetType, CutManifest, MediaKind
+from shortly.core.domain.assets import (
+    AssetCandidate,
+    AssetType,
+    CandidateStatus,
+    CutManifest,
+    MediaKind,
+)
 from shortly.core.use_cases.build_cut_manifest import (
     build_cut_manifest,
     classify_asset_type,
@@ -104,6 +110,9 @@ class CutManifestTests(unittest.TestCase):
         self.assertIn("/stock-search?", page)
         self.assertIn("/stock-select", page)
         self.assertIn("CC BY 결과도 포함", page)
+        self.assertIn("현재 선택은 해제됩니다", page)
+        self.assertIn("el.value=cut.asset_type", page)
+        self.assertIn("스톡 이미지가 선택되지 않은 컷이 있습니다", page)
         self.assertIn("<th>미리보기</th>", page)
         self.assertIn("/preview?v=", page)
         self.assertIn("AI 이미지", page)
@@ -275,6 +284,47 @@ class CutManifestTests(unittest.TestCase):
         self.assertEqual(
             response.json()["schema_version"], "shortly-cut-manifest-v1"
         )
+
+    @unittest.skipIf(TestClient is None, "FastAPI runtime unavailable")
+    def test_type_change_clears_selection_but_preserves_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with isolated_shortly_env(
+                SHORTLY_USER_DATA=str(Path(temporary) / "state"),
+                SHORTLY_DATA_DIR=str(Path(temporary) / "data"),
+                SHORTLY_ARTIFACT_DIR=str(Path(temporary) / "artifacts"),
+            ):
+                app = create_personal_app()
+                store = app.state.personal_automation["store"]
+                manifest = build_cut_manifest(_guide())
+                cut = manifest.cuts[0]
+                candidate = AssetCandidate(
+                    provider="fixture",
+                    model="fixture",
+                    media_kind=MediaKind.IMAGE,
+                    status=CandidateStatus.SELECTED,
+                )
+                cut.candidates.append(candidate)
+                cut.selected_candidate_id = candidate.id
+                store.save_manifest(manifest)
+
+                with TestClient(
+                    app, client=("127.0.0.1", 50000)
+                ) as client:
+                    response = client.patch(
+                        f"/api/personal/manifests/{manifest.manifest_id}"
+                        f"/cuts/{cut.id}",
+                        json={"asset_type": AssetType.STOCK_IMAGE.value},
+                    )
+
+                saved = store.load_manifest(manifest.manifest_id).cut(cut.id)
+                history = store.selection_history(manifest.manifest_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(saved.selected_candidate_id)
+        self.assertEqual(len(saved.candidates), 1)
+        self.assertEqual(saved.candidates[0].id, candidate.id)
+        self.assertEqual(saved.candidates[0].status, CandidateStatus.READY)
+        self.assertTrue(history[0]["metadata"]["selection_cleared"])
 
     @unittest.skipIf(TestClient is None, "FastAPI runtime unavailable")
     def test_saved_guide_handoff_reuses_the_existing_manifest(self) -> None:

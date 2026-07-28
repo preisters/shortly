@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from ....config import get_settings
-from ....core.domain.assets import AssetType, MediaKind
+from ....core.domain.assets import AssetType, CandidateStatus, MediaKind
 from ....core.use_cases.build_cut_manifest import (
     ASSET_CLASSIFIER_VERSION,
     build_cut_manifest,
@@ -24,7 +24,7 @@ from .graph import WorkflowRun, WorkflowStage
 from .review import qwen_read_only_review, technical_review
 from .selection import select_candidate
 from .settings import PersonalAutomationSettings
-from .stock_search import OpenverseStockService
+from .stock_search import StockSearchService
 from .store import (
     ApprovalRequiredError,
     AutomationStore,
@@ -67,6 +67,7 @@ class SelectionRequest(BaseModel):
 class StockSelectionRequest(BaseModel):
     result_id: str
     query: str = ""
+    provider: str = "openverse"
 
 
 class PrepareExportRequest(BaseModel):
@@ -159,7 +160,11 @@ def create_router(
     service_api: Any,
 ) -> APIRouter:
     router = APIRouter()
-    stock_service = OpenverseStockService(settings.assets_dir)
+    stock_service = StockSearchService(
+        settings.assets_dir,
+        pixabay_api_key=settings.pixabay_api_key,
+        pexels_api_key=settings.pexels_api_key,
+    )
 
     @router.get("/personal/assets", response_class=HTMLResponse)
     def asset_console() -> HTMLResponse:
@@ -186,6 +191,7 @@ def create_router(
             "max_regenerations": settings.max_regenerations,
             "stock_search": {
                 "provider": stock_service.provider,
+                "providers": stock_service.statuses(),
                 "default_licenses": ["pdm", "cc0"],
                 "optional_licenses": ["by"],
                 "cost_usd": 0.0,
@@ -277,6 +283,14 @@ def create_router(
                 raise ValueError(
                     "Fact-sensitive cuts cannot use automatic generation."
                 )
+            previous_type = cut.asset_type
+            previous_candidate = cut.selected_candidate
+            selection_cleared = (
+                previous_type is not target and previous_candidate is not None
+            )
+            if selection_cleared:
+                previous_candidate.status = CandidateStatus.READY
+                cut.selected_candidate_id = None
             cut.asset_type = target
             cut.media_kind = (
                 MediaKind.VIDEO
@@ -289,7 +303,16 @@ def create_router(
                 cut_id=cut_id,
                 candidate_id=None,
                 action="asset_type_changed",
-                metadata={"asset_type": target.value},
+                metadata={
+                    "asset_type": target.value,
+                    "previous_asset_type": previous_type.value,
+                    "selection_cleared": selection_cleared,
+                    "previous_candidate_id": (
+                        previous_candidate.id
+                        if selection_cleared and previous_candidate
+                        else None
+                    ),
+                },
             )
             return cut.to_dict()
         except Exception as exc:
@@ -407,6 +430,7 @@ def create_router(
         q: str,
         page: int = 1,
         include_by: bool = False,
+        provider: str = "all",
     ) -> dict:
         try:
             manifest = store.load_manifest(manifest_id)
@@ -419,6 +443,7 @@ def create_router(
                 q,
                 page=page,
                 include_by=include_by,
+                provider=provider,
             )
         except Exception as exc:
             raise _error(exc) from exc
@@ -438,6 +463,7 @@ def create_router(
                 cut_id=cut_id,
                 result_id=body.result_id,
                 query=body.query,
+                provider=body.provider,
             )
         except Exception as exc:
             raise _error(exc) from exc

@@ -24,11 +24,11 @@
     table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #303341;text-align:left}
     .stock-modal[hidden]{display:none}.stock-modal{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(5,6,10,.82)}
     .stock-dialog{width:min(1040px,100%);max-height:90vh;overflow:auto;box-sizing:border-box;background:#191b23;border:1px solid #4a4f63;border-radius:14px;padding:20px;box-shadow:0 18px 70px #000}
-    .stock-dialog h2{margin:0}.stock-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.stock-search{display:grid;grid-template-columns:1fr auto;gap:8px;margin:16px 0 8px}
-    .stock-search input{min-width:0}.stock-options{margin-bottom:14px}.stock-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+    .stock-dialog h2{margin:0}.stock-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.stock-search{display:grid;grid-template-columns:auto 1fr auto;gap:8px;margin:16px 0 8px}
+    .stock-search input{min-width:0}.stock-options{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:14px}.stock-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
     .stock-card{display:flex;flex-direction:column;gap:8px;padding:10px;background:#11131a;border:1px solid #343849;border-radius:10px;min-width:0}
     .stock-card img{width:100%;aspect-ratio:4/3;object-fit:cover;background:#090a0e;border-radius:7px}.stock-card strong{overflow-wrap:anywhere}.stock-card small{color:#aeb2c1;line-height:1.4}
-    .stock-card button{margin-top:auto}.license-badge{display:inline-block;width:max-content;padding:2px 6px;border-radius:4px;background:#264b3c;color:#baf2d3;font-size:11px}
+    .stock-card button{margin-top:auto}.badge-row{display:flex;gap:6px;flex-wrap:wrap}.license-badge,.provider-badge{display:inline-block;width:max-content;padding:2px 6px;border-radius:4px;font-size:11px}.license-badge{background:#264b3c;color:#baf2d3}.provider-badge{background:#303a65;color:#cad5ff}
     .stock-pagination{display:flex;justify-content:center;align-items:center;gap:10px;margin-top:16px}.stock-empty{grid-column:1/-1;padding:36px;text-align:center;color:#a7abba}
     .asset-preview{width:142px;min-width:142px}.asset-preview img,.asset-preview video{display:block;width:136px;height:104px;object-fit:contain;background:#090a0e;border:1px solid #3a3e50;border-radius:8px}
     .asset-preview a{display:block}.preview-empty{display:flex;width:136px;height:104px;align-items:center;justify-content:center;box-sizing:border-box;border:1px dashed #3a3e50;border-radius:8px;color:#777c8d;font-size:12px;text-align:center}
@@ -47,7 +47,7 @@
     <h2>2. 컷 유형과 생성</h2>
     <ul class="asset-guide">
       <li><b>AI 이미지/영상 생성 권장</b>: 사실성 제약이 없고 스톡으로 정확히 찾기 어려운 연출 컷</li>
-      <li><b>스톡 이미지</b>: Openverse에서 PDM·CC0 이미지를 검색·선택하면 해당 컷에 자동 삽입</li>
+      <li><b>스톡 이미지</b>: Openverse·Pixabay·Pexels에서 검색·선택하면 해당 컷에 자동 삽입</li>
       <li><b>실제 이미지</b>: 제품·인물·사건의 원본 사진을 직접 확보해야 하는 컷</li>
       <li><b>수동 삽입 필요</b>: 사실성이 중요하거나 자동 확보 수단이 없는 컷이며 AI 생성 비권장</li>
     </ul>
@@ -85,13 +85,20 @@
         <button id="stock-close" class="secondary" aria-label="닫기">닫기</button>
       </div>
       <div class="stock-search">
+        <select id="stock-provider" aria-label="검색 사이트">
+          <option value="all">사용 가능한 전체</option>
+          <option value="openverse">Openverse</option>
+        </select>
         <input id="stock-query" placeholder="이미지 검색어">
         <button id="stock-search-button">검색</button>
       </div>
-      <label class="stock-options">
-        <input id="stock-include-by" type="checkbox">
-        저작자 표시가 필요한 CC BY 결과도 포함
-      </label>
+      <div class="stock-options">
+        <label>
+          <input id="stock-include-by" type="checkbox">
+          Openverse CC BY 결과도 포함
+        </label>
+        <span id="stock-provider-status" class="muted"></span>
+      </div>
       <p id="stock-notice" class="muted">기본 검색은 PDM·CC0만 사용합니다. 선택 전 원본 페이지의 라이선스를 확인하세요.</p>
       <div id="stock-results" class="stock-grid"><div class="stock-empty">검색어를 확인하는 중입니다.</div></div>
       <div class="stock-pagination">
@@ -254,7 +261,32 @@
         ${assetTypes.map(v=>`<option value="${v}" ${v===c.asset_type?"selected":""}>${assetLabels[v]}</option>`).join("")}
         </select></td><td class="reason" title="${escapeHtml(compactReason(c))}"><span class="reason-text">${escapeHtml(compactReason(c))}</span>${c.fact_sensitive?'<span class="fact">사실성 보호</span>':""}</td><td class="asset-preview">${previewMarkup(c)}</td><td data-cut-status="${escapeHtml(c.id)}">${statusLabel(c)}</td><td>${c.asset_type.startsWith("generated_")?`<button data-generate="${escapeHtml(c.id)}" ${batchRunning?"disabled":""}>비용 확인·생성</button>`:c.asset_type==="stock_image"?`<button class="secondary" data-stock-search="${escapeHtml(c.id)}">${c.selected_candidate_id?"스톡 이미지 변경":"무료 스톡 검색"}</button>`:c.asset_type==="real_image"?"원본 직접 확보":"수동 처리"}</td></tr>`).join("")+"</tbody></table>";
       target.querySelectorAll("select").forEach(el=>el.onchange=async()=>{
-        try{await api(`/api/personal/manifests/${manifest.manifest_id}/cuts/${el.dataset.cut}`,{method:"PATCH",body:JSON.stringify({asset_type:el.value})});preparedExport=null;manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);render()}catch(e){result.textContent=e.message}
+        const cut=manifest.cuts.find(item=>item.id===el.dataset.cut);
+        if(!cut) return;
+        if(cut.selected_candidate_id&&el.value!==cut.asset_type){
+          const candidate=selectedCandidate(cut);
+          const mediaLabel=candidate?.media_kind==="video"?"동영상":"이미지";
+          if(!confirm(
+            `이 컷에는 이전에 선택한 ${mediaLabel}가 있습니다.\\n`+
+            "유형을 변경하면 현재 선택은 해제됩니다. 파일과 후보 기록은 삭제되지 않아 다시 선택할 수 있습니다.\\n\\n"+
+            "계속할까요?"
+          )){
+            el.value=cut.asset_type;
+            return;
+          }
+        }
+        try{
+          await api(`/api/personal/manifests/${manifest.manifest_id}/cuts/${el.dataset.cut}`,{
+            method:"PATCH",
+            body:JSON.stringify({asset_type:el.value})
+          });
+          preparedExport=null;
+          manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);
+          render();
+        }catch(e){
+          el.value=cut.asset_type;
+          result.textContent=e.message;
+        }
       });
       target.querySelectorAll("[data-stock-search]").forEach(el=>el.onclick=()=>{
         const cut=manifest.cuts.find(c=>c.id===el.dataset.stockSearch);
@@ -283,7 +315,10 @@
       document.querySelector("#stock-prev").disabled=stockSearching||stockPage<=1;
       document.querySelector("#stock-next").disabled=stockSearching||stockPage>=stockPageCount;
       document.querySelector("#stock-notice").textContent=
-        `${payload.licenses.map(value=>value.toUpperCase()).join(" · ")} 결과 · ${payload.license_notice}`;
+        `${payload.licenses.map(value=>value.toUpperCase()).join(" · ")} · ${payload.license_notice}`+
+        (payload.provider_errors?.length
+          ? ` 일부 사이트 오류: ${payload.provider_errors.map(item=>item.provider).join(", ")}`
+          : "");
       const target=document.querySelector("#stock-results");
       if(!payload.results.length){
         target.innerHTML='<div class="stock-empty">검색 결과가 없습니다. 더 일반적인 검색어를 사용해 보세요.</div>';
@@ -296,10 +331,13 @@
         return `<article class="stock-card">
           ${thumbnail?`<img src="${escapeHtml(thumbnail)}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer">`:""}
           <strong>${escapeHtml(item.title)}</strong>
-          <span class="license-badge">${escapeHtml(item.license_label)}</span>
+          <div class="badge-row">
+            <span class="provider-badge">${escapeHtml(item.provider_label||item.provider)}</span>
+            <span class="license-badge">${escapeHtml(item.license_label)}</span>
+          </div>
           <small>${escapeHtml(attribution)}${item.source?`<br>출처: ${escapeHtml(item.source)}`:""}</small>
           ${landing?`<a href="${escapeHtml(landing)}" target="_blank" rel="noopener noreferrer">원본·라이선스 확인</a>`:""}
-          <button data-stock-select="${escapeHtml(item.id)}" data-stock-license="${escapeHtml(item.license)}">이 이미지 선택</button>
+          <button data-stock-select="${escapeHtml(item.id)}" data-stock-provider="${escapeHtml(item.provider)}" data-stock-license="${escapeHtml(item.license)}">이 이미지 선택</button>
         </article>`;
       }).join("");
       target.querySelectorAll("[data-stock-select]").forEach(button=>button.onclick=async()=>{
@@ -313,6 +351,7 @@
             method:"POST",
             body:JSON.stringify({
               result_id:button.dataset.stockSelect,
+              provider:button.dataset.stockProvider,
               query:document.querySelector("#stock-query").value
             })
           });
@@ -334,12 +373,14 @@
       if(!query){result.textContent="스톡 이미지 검색어를 입력하세요.";return}
       stockSearching=true;
       document.querySelector("#stock-search-button").disabled=true;
-      document.querySelector("#stock-results").innerHTML='<div class="stock-empty"><span class="spinner"></span>Openverse 검색 중</div>';
+      document.querySelector("#stock-provider").disabled=true;
+      document.querySelector("#stock-results").innerHTML='<div class="stock-empty"><span class="spinner"></span>무료 스톡 사이트 검색 중</div>';
       try{
         const includeBy=document.querySelector("#stock-include-by").checked;
+        const provider=document.querySelector("#stock-provider").value;
         const payload=await api(
           `/api/personal/manifests/${manifest.manifest_id}/cuts/${stockCutId}/stock-search?`+
-          `q=${encodeURIComponent(query)}&page=${page}&include_by=${includeBy}`
+          `q=${encodeURIComponent(query)}&page=${page}&include_by=${includeBy}&provider=${encodeURIComponent(provider)}`
         );
         renderStockResults(payload);
       }catch(error){
@@ -348,24 +389,49 @@
       }finally{
         stockSearching=false;
         document.querySelector("#stock-search-button").disabled=false;
+        document.querySelector("#stock-provider").disabled=false;
         document.querySelector("#stock-prev").disabled=stockPage<=1;
         document.querySelector("#stock-next").disabled=stockPage>=stockPageCount;
       }
     }
-    function openStockSearch(cut){
+    async function configureStockProviders(){
+      automationStatus ||= await api("/api/personal/automation/status");
+      const providers=automationStatus.stock_search?.providers||[];
+      const select=document.querySelector("#stock-provider");
+      select.innerHTML='<option value="all">사용 가능한 전체</option>'+
+        providers.map(item=>
+          `<option value="${escapeHtml(item.id)}" ${item.available?"":"disabled"}>`+
+          `${escapeHtml(item.label)}${item.available?"":" (API 키 미설정)"}</option>`
+        ).join("");
+      const unavailable=providers.filter(item=>!item.available);
+      document.querySelector("#stock-provider-status").textContent=unavailable.length
+        ? `${unavailable.map(item=>item.label).join("·")}는 .env API 키 설정 후 서버를 재시작하면 활성화됩니다.`
+        : "Openverse·Pixabay·Pexels를 모두 검색할 수 있습니다.";
+    }
+    async function openStockSearch(cut){
       stockCutId=cut.id;
       stockPage=1;
       stockPageCount=1;
       document.querySelector("#stock-cut").textContent=`${cut.id} · ${cut.prompt}`;
       document.querySelector("#stock-query").value=cut.prompt||"";
       document.querySelector("#stock-modal").hidden=false;
-      searchStock(1);
+      try{
+        await configureStockProviders();
+        searchStock(1);
+      }catch(error){
+        document.querySelector("#stock-results").innerHTML=`<div class="stock-empty error">${escapeHtml(error.message)}</div>`;
+      }
     }
     document.querySelector("#stock-close").onclick=closeStockSearch;
     document.querySelector("#stock-modal").onclick=event=>{if(event.target.id==="stock-modal") closeStockSearch()};
     document.querySelector("#stock-search-button").onclick=()=>searchStock(1);
     document.querySelector("#stock-query").onkeydown=event=>{if(event.key==="Enter") searchStock(1)};
     document.querySelector("#stock-include-by").onchange=()=>searchStock(1);
+    document.querySelector("#stock-provider").onchange=event=>{
+      document.querySelector("#stock-include-by").disabled=
+        !["all","openverse"].includes(event.target.value);
+      searchStock(1);
+    };
     document.querySelector("#stock-prev").onclick=()=>searchStock(stockPage-1);
     document.querySelector("#stock-next").onclick=()=>searchStock(stockPage+1);
     document.addEventListener("keydown",event=>{if(event.key==="Escape"&&!document.querySelector("#stock-modal").hidden) closeStockSearch()});
@@ -434,6 +500,14 @@
     }catch(e){result.textContent=e.message}finally{reviewRunning=false;button.disabled=false;button.textContent="로컬 Qwen 검수"}};
     document.querySelector("#usage").onclick=async()=>{try{show(await api(`/api/personal/usage?manifest_id=${manifest.manifest_id}`))}catch(e){result.textContent=e.message}};
     document.querySelector("#prepare-export").onclick=async()=>{try{
+      const missingStock=(manifest?.cuts||[])
+        .filter(cut=>cut.asset_type==="stock_image"&&!cut.selected_candidate_id)
+        .map(cut=>cut.id);
+      if(missingStock.length){
+        throw new Error(
+          `스톡 이미지가 선택되지 않은 컷이 있습니다: ${missingStock.join(", ")}`
+        );
+      }
       preparedExport=await api("/api/personal/exports/prepare",{method:"POST",body:JSON.stringify({manifest_id:manifest.manifest_id,guide:JSON.parse(document.querySelector("#guide").value),capcut_root:document.querySelector("#capcut-root").value||null})});show(preparedExport)
     }catch(e){result.textContent=e.message}};
     document.querySelector("#commit-export").onclick=async()=>{try{

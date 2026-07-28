@@ -13,6 +13,9 @@ from fastapi.testclient import TestClient
 from shortly.apps.personal.api import create_app as create_personal_app
 from shortly.apps.personal.automation.stock_search import (
     OpenverseStockService,
+    PexelsStockService,
+    PixabayStockService,
+    StockSearchService,
     _validate_public_https_url,
 )
 from shortly.apps.personal.automation.store import AutomationStore
@@ -98,6 +101,171 @@ class StockSearchTests(unittest.TestCase):
         )
         self.assertEqual(query["license"], ["pdm,cc0,by"])
         self.assertEqual(result["licenses"], ["pdm", "cc0", "by"])
+
+    def test_pixabay_search_normalizes_site_and_caches_without_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "shortly.apps.personal.automation.stock_search._request_json",
+            return_value={
+                "totalHits": 1,
+                "hits": [
+                    {
+                        "id": 123,
+                        "tags": "시장, 음식",
+                        "webformatURL": "https://cdn.example.test/pixabay.jpg",
+                        "pageURL": "https://pixabay.com/photos/123/",
+                        "user": "Fixture",
+                        "imageWidth": 1200,
+                        "imageHeight": 1800,
+                    }
+                ],
+            },
+        ) as request:
+            service = PixabayStockService(Path(temporary), "pixabay-secret")
+            first = service.search("시장")
+            second = service.search("시장")
+            cache_text = " ".join(
+                path.read_text(encoding="utf-8")
+                for path in Path(temporary).rglob("*.json")
+            )
+
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(first, second)
+        self.assertEqual(first["results"][0]["provider"], "pixabay")
+        self.assertEqual(
+            first["results"][0]["provider_label"],
+            "Pixabay",
+        )
+        called_url = request.call_args.args[0]
+        self.assertIn("pixabay-secret", called_url)
+        self.assertNotIn("pixabay-secret", cache_text)
+
+    def test_pexels_search_uses_authorization_header_and_site_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "shortly.apps.personal.automation.stock_search._request_json",
+            return_value={
+                "total_results": 1,
+                "photos": [
+                    {
+                        "id": 456,
+                        "alt": "Market",
+                        "src": {
+                            "medium": "https://images.pexels.test/medium.jpg"
+                        },
+                        "url": "https://www.pexels.com/photo/456/",
+                        "photographer": "Fixture",
+                        "photographer_url": "https://www.pexels.com/@fixture",
+                        "width": 1200,
+                        "height": 1800,
+                    }
+                ],
+            },
+        ) as request:
+            result = PexelsStockService(
+                Path(temporary),
+                "pexels-secret",
+            ).search("market")
+
+        self.assertEqual(
+            request.call_args.kwargs["headers"]["Authorization"],
+            "pexels-secret",
+        )
+        self.assertEqual(result["results"][0]["provider"], "pexels")
+        self.assertEqual(result["results"][0]["provider_label"], "Pexels")
+
+    def test_aggregate_search_skips_unconfigured_providers(self) -> None:
+        service = StockSearchService(Path("assets"))
+        with patch.object(
+            service.providers["openverse"],
+            "search",
+            return_value={
+                "provider": "openverse",
+                "query": "food",
+                "page": 1,
+                "page_count": 1,
+                "result_count": 1,
+                "licenses": ["cc0"],
+                "results": [
+                    {
+                        "id": _RESULT_ID,
+                        "provider": "openverse",
+                        "provider_label": "Openverse",
+                    }
+                ],
+            },
+        ):
+            result = service.search("food", provider="all")
+
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["provider"], "openverse")
+        statuses = {item["id"]: item for item in service.statuses()}
+        self.assertTrue(statuses["openverse"]["available"])
+        self.assertFalse(statuses["pixabay"]["available"])
+        self.assertFalse(statuses["pexels"]["available"])
+
+    def test_aggregate_selection_records_the_originating_site(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = AutomationStore(root / "automation.sqlite3")
+            manifest = build_cut_manifest(
+                {
+                    "title": "fixture",
+                    "segments": [
+                        {
+                            "duration_sec": 2,
+                            "image_suggestions": ["시장 사진"],
+                        }
+                    ],
+                }
+            )
+            cut = manifest.cuts[0]
+            cut.asset_type = AssetType.STOCK_IMAGE
+            store.save_manifest(manifest)
+            service = StockSearchService(
+                root / "assets",
+                pixabay_api_key="fixture-key",
+            )
+            pixabay = service.providers["pixabay"]
+            with patch.object(
+                pixabay,
+                "detail",
+                return_value={
+                    "id": "123",
+                    "title": "Market",
+                    "creator": "Fixture",
+                    "license": "pixabay",
+                    "license_label": "Pixabay Content License",
+                    "license_url": "https://pixabay.com/service/license-summary/",
+                    "source": "Pixabay",
+                    "provider": "pixabay",
+                    "provider_label": "Pixabay",
+                    "landing_url": "https://pixabay.com/photos/123/",
+                    "attribution": "Fixture · Pixabay",
+                    "download_url": "https://cdn.example.test/image.jpg",
+                },
+            ), patch(
+                "shortly.apps.personal.automation.stock_search._download_image",
+                return_value=(
+                    _jpeg_bytes(),
+                    "https://cdn.example.test/image.jpg",
+                ),
+            ):
+                service.select(
+                    store,
+                    provider="pixabay",
+                    manifest_id=manifest.manifest_id,
+                    cut_id=cut.id,
+                    result_id="123",
+                    query="market",
+                )
+
+            selected = store.load_manifest(manifest.manifest_id).cut(
+                cut.id
+            ).selected_candidate
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.provider, "pixabay")
+        self.assertEqual(selected.metadata["provider_label"], "Pixabay")
+        self.assertEqual(selected.metadata["source"], "Pixabay")
 
     def test_private_or_non_https_download_urls_are_rejected(self) -> None:
         with self.assertRaises(ValueError):

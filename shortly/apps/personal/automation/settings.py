@@ -35,6 +35,8 @@ class PersonalAutomationSettings:
     video_estimated_cost_usd: float = 1.0
     max_regenerations: int = 1
     candidate_count: int = 1
+    pixabay_api_key: str = ""
+    pexels_api_key: str = ""
 
     @property
     def database_path(self) -> Path:
@@ -77,4 +79,6 @@ class PersonalAutomationSettings:
                 0, _int("SHORTLY_MAX_ASSET_REGENERATIONS", 1)
             ),
             candidate_count=max(1, _int("SHORTLY_ASSET_CANDIDATES", 1)),
+            pixabay_api_key=os.environ.get("PIXABAY_API_KEY", "").strip(),
+            pexels_api_key=os.environ.get("PEXELS_API_KEY", "").strip(),
         )

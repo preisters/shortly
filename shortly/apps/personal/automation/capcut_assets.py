@@ -72,6 +72,7 @@ def prepare_export(
     for cut in manifest.cuts:
         candidate = cut.selected_candidate
         requires_selected = cut.asset_type in (
+            AssetType.STOCK_IMAGE,
             AssetType.GENERATED_IMAGE,
             AssetType.GENERATED_VIDEO,
         )
@@ -98,7 +99,8 @@ def prepare_export(
         }
     if missing:
         raise ValueError(
-            "Selected assets are missing for cuts: " + ", ".join(sorted(missing))
+            "내보내기에 필요한 에셋이 선택되지 않았거나 파일이 없습니다: "
+            + ", ".join(sorted(missing))
         )
     export_id = uuid4().hex
     directory = Path(staging_root) / manifest_id / "exports" / export_id

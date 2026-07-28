@@ -71,6 +71,12 @@ python -m shortly.apps.personal.launcher
 세 단계로 분리되며 승인 토큰은 한 번만 사용할 수 있습니다. 생성물과 사용량 DB는
 개인판 데이터·결과물 폴더에 저장됩니다.
 
+스톡 이미지 컷은 Openverse를 기본으로 검색합니다. `.env`에
+`PIXABAY_API_KEY`와 `PEXELS_API_KEY`를 설정하고 서버를 다시 시작하면
+Pixabay와 Pexels도 함께 검색할 수 있습니다. 검색 결과 카드에는 사이트와
+라이선스가 표시되며, 이미지를 선택하지 않은 스톡 컷이 있으면 CapCut 내보내기가
+차단됩니다.
+
 실제 API 가격은 바뀔 수 있으므로 생성 전 공급자 대시보드의 현재 가격을 확인하세요.
 영상 공급자인 Gemini Omni Flash는 현재 preview이므로 중요한 작업은 결과와 과금을
 별도로 확인해야 합니다.

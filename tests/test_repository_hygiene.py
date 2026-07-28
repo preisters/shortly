@@ -78,7 +78,8 @@ class RepositoryHygieneTests(unittest.TestCase):
             re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b"),
             re.compile(
                 r"(?m)^(?:GEMINI_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|"
-                r"TYPECAST_API_KEY)[ \t]*=[ \t]*\S+"
+                r"TYPECAST_API_KEY|PIXABAY_API_KEY|PEXELS_API_KEY)"
+                r"[ \t]*=[ \t]*\S+"
             ),
         ]
         matches = []

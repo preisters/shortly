@@ -100,6 +100,10 @@ class CutManifestTests(unittest.TestCase):
         self.assertIn("data-cut-status", page)
         self.assertIn("setInterval(refreshJobStatuses,2000)", page)
         self.assertIn('setCutState(cut.id,"running")', page)
+        self.assertIn('data-stock-search="', page)
+        self.assertIn("/stock-search?", page)
+        self.assertIn("/stock-select", page)
+        self.assertIn("CC BY 결과도 포함", page)
 
     def test_guide_conversion_is_versioned_and_does_not_mutate_input(self) -> None:
         guide = _guide()

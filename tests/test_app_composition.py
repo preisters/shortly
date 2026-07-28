@@ -106,6 +106,20 @@ class AppCompositionTests(unittest.TestCase):
             ("POST", "/api/personal/manifests/from-guide"),
             personal_routes,
         )
+        self.assertIn(
+            (
+                "GET",
+                "/api/personal/manifests/{manifest_id}/cuts/{cut_id}/stock-search",
+            ),
+            personal_routes,
+        )
+        self.assertIn(
+            (
+                "POST",
+                "/api/personal/manifests/{manifest_id}/cuts/{cut_id}/stock-select",
+            ),
+            personal_routes,
+        )
         self.assertNotIn(
             ("POST", "/api/personal/manifests"),
             set(route_manifest(team)),

@@ -24,6 +24,7 @@ from .graph import WorkflowRun, WorkflowStage
 from .review import qwen_read_only_review, technical_review
 from .selection import select_candidate
 from .settings import PersonalAutomationSettings
+from .stock_search import OpenverseStockService
 from .store import (
     ApprovalRequiredError,
     AutomationStore,
@@ -61,6 +62,11 @@ class ExecuteRequest(BaseModel):
 class SelectionRequest(BaseModel):
     candidate_id: str
     reason: str = ""
+
+
+class StockSelectionRequest(BaseModel):
+    result_id: str
+    query: str = ""
 
 
 class PrepareExportRequest(BaseModel):
@@ -153,6 +159,7 @@ def create_router(
     service_api: Any,
 ) -> APIRouter:
     router = APIRouter()
+    stock_service = OpenverseStockService(settings.assets_dir)
 
     @router.get("/personal/assets", response_class=HTMLResponse)
     def asset_console() -> HTMLResponse:
@@ -177,6 +184,12 @@ def create_router(
             },
             "candidate_count": settings.candidate_count,
             "max_regenerations": settings.max_regenerations,
+            "stock_search": {
+                "provider": stock_service.provider,
+                "default_licenses": ["pdm", "cc0"],
+                "optional_licenses": ["by"],
+                "cost_usd": 0.0,
+            },
             "default_estimates_usd": {
                 "image": settings.image_estimated_cost_usd,
                 "video": settings.video_estimated_cost_usd,
@@ -339,6 +352,50 @@ def create_router(
                 cut_id=cut_id,
                 candidate_id=body.candidate_id,
                 reason=body.reason,
+            )
+        except Exception as exc:
+            raise _error(exc) from exc
+
+    @router.get(
+        "/api/personal/manifests/{manifest_id}/cuts/{cut_id}/stock-search"
+    )
+    def search_stock_images(
+        manifest_id: str,
+        cut_id: str,
+        q: str,
+        page: int = 1,
+        include_by: bool = False,
+    ) -> dict:
+        try:
+            manifest = store.load_manifest(manifest_id)
+            cut = manifest.cut(cut_id)
+            if cut.asset_type is not AssetType.STOCK_IMAGE:
+                raise ValueError(
+                    "스톡 이미지로 지정된 컷에서만 검색할 수 있습니다."
+                )
+            return stock_service.search(
+                q,
+                page=page,
+                include_by=include_by,
+            )
+        except Exception as exc:
+            raise _error(exc) from exc
+
+    @router.post(
+        "/api/personal/manifests/{manifest_id}/cuts/{cut_id}/stock-select"
+    )
+    def select_stock_image(
+        manifest_id: str,
+        cut_id: str,
+        body: StockSelectionRequest,
+    ) -> dict:
+        try:
+            return stock_service.select(
+                store,
+                manifest_id=manifest_id,
+                cut_id=cut_id,
+                result_id=body.result_id,
+                query=body.query,
             )
         except Exception as exc:
             raise _error(exc) from exc

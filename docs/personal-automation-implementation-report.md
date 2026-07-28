@@ -114,16 +114,19 @@ python -m shortly.apps.personal.launcher
 
 ## 6. 아직 필요한 수동 검증
 
-1. 실제 OpenAI 키로 `gpt-image-2`, medium, 1024×1536 이미지 1장을 생성하고
-   응답 필드·과금·moderation 오류를 확인한다.
-2. 실제 Google 키와 설치된 `google-genai`로
-   `gemini-omni-flash-preview` 9:16 영상 1건을 생성한다. preview 사용 가능
-   지역, 응답 크기, 비용, 지연 시간을 확인한다.
-3. 현재 사용 중인 CapCut Windows 버전에서 생성 이미지와 MP4가 들어간 프로젝트를
-   열고 길이, crop, 오디오, project root 등록을 확인한다.
-4. 영상이 4MB를 넘어 inline 응답이 부적절하면 Google URI delivery와 files polling을
+2026-07-28 실제 smoke 결과는
+[`provider-capcut-smoke-report.md`](provider-capcut-smoke-report.md)에 기록했다.
+OpenAI 이미지, Google 영상, Anthropic 최소 텍스트 호출과 CapCut 새 프로젝트 생성,
+정적 사후 검증까지 성공했다.
+
+아직 필요한 확인:
+
+1. CapCut에서 `Shortly Provider Smoke 20260728`을 직접 열어 이미지·영상·자막을
+   재생하고 저장 후 다시 연다.
+2. 각 공급자 dashboard에서 실제 청구액을 확인하고 예상 비용 기본값을 조정한다.
+3. 영상이 4MB를 넘어 inline 응답이 부적절하면 Google URI delivery와 files polling을
    별도 PR로 구현한다.
-5. 기본 예상 비용과 편당·일간·월간 상한은 실제 5~10편 사용 후 조정한다.
+4. 기본 예상 비용과 편당·일간·월간 상한은 실제 5~10편 사용 후 조정한다.
 
 ## 7. 공식 API 기준
 

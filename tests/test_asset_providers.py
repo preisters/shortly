@@ -10,6 +10,7 @@ from shortly.apps.personal.assets.openai_image import OpenAIImageProvider
 from shortly.core.domain.assets import MediaKind
 from shortly.core.ports.assets import (
     ImageGenerationRequest,
+    ProviderUnavailableError,
     VideoGenerationRequest,
 )
 
@@ -64,6 +65,11 @@ class AssetProviderTests(unittest.TestCase):
             client.interactions.kwargs["response_format"]["aspect_ratio"],
             "9:16",
         )
+
+    def test_google_adapter_reports_sdk_without_interactions(self) -> None:
+        provider = GoogleVideoProvider("", client=object())
+        with self.assertRaises(ProviderUnavailableError):
+            provider.submit(VideoGenerationRequest(prompt="fixture"))
 
     def test_fake_provider_is_deterministic_and_cost_free_by_default(self) -> None:
         provider = FakeImageProvider()

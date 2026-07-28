@@ -17,11 +17,11 @@
     <section class="card" id="section-settings">
       <h2>설정 · AI 연결</h2>
       <p class="hint" id="settings-hint-full">분석과 대본 생성에 쓸 AI를 고르고 토큰(API 키)을 넣으세요. 비워두면 간단한 자동 규칙으로만 동작합니다. 키는 이 컴퓨터의 .env 파일에만 저장됩니다.</p>
-      <p class="hint" id="settings-hint-portable" style="display:none">팀용 포터블 버전입니다. <b>학습 AI = Claude Sonnet 5</b>, <b>대본 생성 AI = Claude Opus 4.8</b> 로 고정되어 있습니다. Claude API 키와 CapCut 내보내기용 <b>Typecast TTS API 키</b>를 입력하세요. 키는 이 PC의 사용자 폴더에만 저장됩니다.</p>
+      <p class="hint" id="settings-hint-portable" style="display:none">팀용 포터블 버전입니다. <b>학습 AI = Claude Sonnet 5</b>, <b>대본 생성 AI = Claude Opus 5</b> 로 고정되어 있습니다. Claude API 키와 CapCut 내보내기용 <b>Typecast TTS API 키</b>를 입력하세요. 키는 이 PC의 사용자 폴더에만 저장됩니다.</p>
       <div id="ai-settings-portable" style="display:none">
         <div class="row">
           <span class="hint">학습: <b id="portable-learn-model">claude-sonnet-5</b></span>
-          <span class="hint">생성: <b id="portable-gen-model">claude-opus-4-8</b></span>
+          <span class="hint">생성: <b id="portable-gen-model">claude-opus-5</b></span>
         </div>
         <div class="row">
           <label class="grow">Claude API 키
@@ -79,7 +79,7 @@
           </select>
         </label>
         <label id="lbl-gen-model" style="display:none">생성 모델명
-          <input id="set-gen-model" type="text" placeholder="예: claude-opus-4-8" style="width:220px" />
+          <input id="set-gen-model" type="text" placeholder="예: claude-opus-5" style="width:220px" />
         </label>
         <input id="set-gen-key" type="password" class="grow" placeholder="생성 AI의 API 키(이미 저장돼 있으면 비워두세요)" style="display:none" />
       </div>

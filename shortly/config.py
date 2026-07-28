@@ -122,7 +122,7 @@ _DEFAULT_VISION_MODELS = {
 
 # 팀용 포터블 빌드에서 강제하는 모델(변경 불가)
 PORTABLE_ANALYSIS_MODEL = "claude-sonnet-5"
-PORTABLE_GENERATION_MODEL = "claude-opus-4-8"
+PORTABLE_GENERATION_MODEL = "claude-opus-5"
 
 
 @dataclass

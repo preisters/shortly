@@ -44,6 +44,7 @@ class SettingsContractTests(unittest.TestCase):
         self.assertEqual(settings.gen_provider, "anthropic")
         self.assertEqual(settings.text_model, config.PORTABLE_ANALYSIS_MODEL)
         self.assertEqual(settings.gen_text_model, config.PORTABLE_GENERATION_MODEL)
+        self.assertEqual(settings.gen_text_model, "claude-opus-5")
         self.assertEqual(settings.data_dir, user_root / "data")
         self.assertEqual(settings.artifact_dir, artifacts)
         self.assertEqual(settings.log_dir, artifacts / "logs")

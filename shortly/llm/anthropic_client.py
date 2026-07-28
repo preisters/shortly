@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
+from typing import Any
 
 from .base import LLMClient, LLMError, LLMUnavailable
 
 
 class AnthropicClient(LLMClient):
     provider = "anthropic"
+    _EFFORT_MODEL_PREFIXES = (
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-fable-5",
+        "claude-mythos-5",
+    )
 
     def __init__(self, api_key: str, text_model: str, vision_model: str) -> None:
         model = text_model or "claude-3-5-sonnet-latest"
@@ -29,6 +38,10 @@ class AnthropicClient(LLMClient):
         if self._client is None:
             raise LLMUnavailable("anthropic 미설치 또는 ANTHROPIC_API_KEY 미설정")
         return self._client
+
+    @classmethod
+    def _supports_custom_temperature(cls, model: str) -> bool:
+        return not model.startswith(cls._EFFORT_MODEL_PREFIXES)
 
     @staticmethod
     def _is_temperature_unsupported(exc: Exception) -> bool:
@@ -53,13 +66,15 @@ class AnthropicClient(LLMClient):
 
     def complete_text(self, system: str, user: str, temperature: float = 0.7,
                       max_tokens: int = 4096) -> str:
-        resp = self._create(
-            model=self.text_model,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        request: dict[str, Any] = {
+            "model": self.text_model,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+            "max_tokens": max_tokens,
+        }
+        if self._supports_custom_temperature(self.text_model):
+            request["temperature"] = temperature
+        resp = self._create(**request)
         return "".join(
             block.text for block in resp.content if getattr(block, "type", "") == "text"
         ).strip()
@@ -67,16 +82,18 @@ class AnthropicClient(LLMClient):
     def describe_image(self, image_path: Path, prompt: str,
                        temperature: float = 0.4, max_tokens: int = 1024) -> str:
         b64 = base64.b64encode(Path(image_path).read_bytes()).decode()
-        resp = self._create(
-            model=self.vision_model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            messages=[{"role": "user", "content": [
+        request: dict[str, Any] = {
+            "model": self.vision_model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64",
                  "media_type": "image/jpeg", "data": b64}},
                 {"type": "text", "text": prompt},
             ]}],
-        )
+        }
+        if self._supports_custom_temperature(self.vision_model):
+            request["temperature"] = temperature
+        resp = self._create(**request)
         return "".join(
             block.text for block in resp.content if getattr(block, "type", "") == "text"
         ).strip()

@@ -1,7 +1,7 @@
 """팀용 Windows 포터블 폴더를 생성합니다.
 
 로컬 개발 버전과 달리:
-- SHORTLY_PORTABLE=1 (학습=Sonnet 5, 생성=Opus 4.8 고정)
+- SHORTLY_PORTABLE=1 (학습=Sonnet 5, 생성=Opus 5 고정)
 - AI 선택 UI 없음 / Claude API 키만
 - 효과음 기능 비활성
 """
@@ -223,7 +223,7 @@ def _write_readme(out_dir: Path) -> None:
 고정된 AI
 ---------
 - 채널 학습: {PORTABLE_ANALYSIS_MODEL} (Claude Sonnet 5)
-- 대본/가이드 생성: {PORTABLE_GENERATION_MODEL} (Claude Opus 4.8)
+- 대본/가이드 생성: {PORTABLE_GENERATION_MODEL} (Claude Opus 5)
 - 효과음 기능: 없음
 
 시작 방법

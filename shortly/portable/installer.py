@@ -134,7 +134,7 @@ def _write_readme(out_dir: Path) -> None:
 고정 AI
 -------
 - 학습: {PORTABLE_ANALYSIS_MODEL} (Sonnet 5)
-- 대본 생성: {PORTABLE_GENERATION_MODEL} (Opus 4.8)
+- 대본 생성: {PORTABLE_GENERATION_MODEL} (Opus 5)
 
 내 데이터 위치 (업데이트해도 유지됨)
 ------------------------------------

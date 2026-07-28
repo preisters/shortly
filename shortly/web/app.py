@@ -520,6 +520,6 @@ def run(host: str = "0.0.0.0", port: int = 8756) -> None:
     print(f"  * 팩트체크(시점·주체): "
           f"{'ON' if settings.factcheck_enabled else 'OFF'}")
     if settings.portable:
-        print("  * 모드: PORTABLE (학습=Sonnet 5, 생성=Opus 4.8, 효과음 OFF)")
+        print("  * 모드: PORTABLE (학습=Sonnet 5, 생성=Opus 5, 효과음 OFF)")
     print("=" * 56, flush=True)
     uvicorn.run(app, host=host, port=port, log_level="info")

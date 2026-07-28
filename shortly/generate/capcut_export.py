@@ -1050,6 +1050,9 @@ _TITLE_PLACEHOLDERS = ("제목이 들어갑니다", "제목을 입력하세요",
 # 사용자가 템플릿에 넣어둔 '자막 예시' 세그먼트를 식별하는 표식(위치/크기 복제용)
 _CAPTION_SAMPLE_MARKERS = ("자막", "대사", "caption", "subtitle")
 _INTRO_DEFAULT_US = 1_000_000  # blank_10 인트로를 못 찾을 때 기본 인트로 길이
+_INTRO_CLICK_LEAD_US = 133_333  # 수동 레퍼런스 3개의 컷 전환 클릭음 중앙값
+_START_SFX_MARKERS = ("띠링", "시작")
+_CLICK_SFX_MARKERS = ("클릭음",)
 
 
 def _tts_cache_path(cfg, cache_dir: Path, text: str,
@@ -1175,6 +1178,191 @@ def _find_audio_template(root: Path, exclude: Optional[str] = None):
                     return {"seg": seg, "materials": mats, "project": d.name}
             return {"seg": t["segments"][0], "materials": mats, "project": d.name}
     return None
+
+
+def _audio_material_label(material: Dict) -> str:
+    """효과음 소재를 이름과 파일명으로 안정적으로 식별할 문자열."""
+
+    values = (
+        material.get("name"),
+        material.get("material_name"),
+        Path(str(material.get("path") or "")).name,
+    )
+    return " ".join(str(value or "") for value in values).lower()
+
+
+def _find_named_audio_segment(dc: Dict, markers: Tuple[str, ...]):
+    """현재 타임라인에서 모든 marker가 이름에 포함된 오디오를 찾는다."""
+
+    materials = dc.get("materials") or {}
+    index = _index_materials(materials)
+    lowered = tuple(marker.lower() for marker in markers)
+    for track in dc.get("tracks") or []:
+        if track.get("type") not in ("audio", "music"):
+            continue
+        for segment in track.get("segments") or []:
+            info = index.get(segment.get("material_id"))
+            if not info:
+                continue
+            label = _audio_material_label(info[1])
+            if all(marker in label for marker in lowered):
+                return {
+                    "seg": segment,
+                    "track": track,
+                    "material": info[1],
+                    "materials": materials,
+                }
+    return None
+
+
+def _find_reference_audio_template(root: Path, markers: Tuple[str, ...]):
+    """지정된 수동 레퍼런스에서 이름이 일치하는 효과음 세그먼트를 찾는다."""
+
+    try:
+        projects = [
+            path
+            for path in root.iterdir()
+            if path.is_dir()
+            and (path / "draft_content.json").is_file()
+            and any(marker in path.name for marker in _REFERENCE_PROJECT_MARKERS)
+        ]
+    except OSError:
+        return None
+    projects.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    for project in projects:
+        try:
+            document = _read_json(project / "draft_content.json")
+        except (OSError, ValueError):
+            continue
+        found = _find_named_audio_segment(document, markers)
+        if found is not None:
+            return {
+                "seg": found["seg"],
+                "materials": found["materials"],
+                "project": project.name,
+                "name": found["material"].get("name") or "",
+            }
+    return None
+
+
+def _append_audio_clone(dc: Dict, template: Dict, start_us: int):
+    """레퍼런스 효과음 한 개를 현재 프로젝트에 복제하고 지정 시점에 배치."""
+
+    segment, cloned, material = _clone_seg(
+        template["seg"],
+        template["materials"],
+    )
+    original_range = template["seg"].get("target_timerange") or {}
+    duration = max(1, int(original_range.get("duration") or 1))
+    segment["target_timerange"] = {
+        "start": max(0, int(start_us)),
+        "duration": duration,
+    }
+    source_range = segment.get("source_timerange")
+    if isinstance(source_range, dict):
+        source_range["duration"] = duration
+    segment["visible"] = True
+    _merge_materials(dc.setdefault("materials", {}), cloned)
+    dc.setdefault("tracks", []).append({
+        "id": _new_id(),
+        "type": "audio",
+        "segments": [segment],
+        "flag": 0,
+        "attribute": 0,
+        "name": "",
+        "is_default_name": True,
+    })
+    return {
+        "seg": segment,
+        "duration": duration,
+        "name": (material or {}).get("name") or template.get("name") or "",
+        "project": template.get("project"),
+    }
+
+
+def _ensure_intro_start_sfx(dc: Dict, root: Path) -> Dict:
+    """시작음을 0초에 보장하고 제목 TTS가 시작할 수 있는 시점을 반환."""
+
+    found = _find_named_audio_segment(dc, _START_SFX_MARKERS)
+    added = False
+    project = None
+    if found is None:
+        template = _find_reference_audio_template(root, _START_SFX_MARKERS)
+        if template is None:
+            return {
+                "present": False,
+                "added": False,
+                "end": 0,
+                "name": "",
+                "project": None,
+            }
+        cloned = _append_audio_clone(dc, template, 0)
+        segment = cloned["seg"]
+        name = cloned["name"]
+        project = cloned["project"]
+        added = True
+    else:
+        segment = found["seg"]
+        name = found["material"].get("name") or ""
+    target = segment.setdefault("target_timerange", {})
+    target["start"] = 0
+    duration = max(1, int(target.get("duration") or 1))
+    target["duration"] = duration
+    return {
+        "present": True,
+        "added": added,
+        "end": duration,
+        "name": name,
+        "project": project,
+    }
+
+
+def _intro_timing(intro_template_end: int, title_dur: int,
+                  start_sfx_end: int) -> Tuple[int, int]:
+    """제목 TTS 시작과 인트로 종료 시점을 겹침 없이 계산."""
+
+    title_start = max(0, int(start_sfx_end)) if title_dur > 0 else 0
+    intro_end = max(
+        int(intro_template_end),
+        title_start + max(0, int(title_dur)),
+    )
+    return title_start, intro_end
+
+
+def _place_intro_transition_click(dc: Dict, root: Path,
+                                  intro_end: int) -> Dict:
+    """클릭음을 인트로 종료 직전에 두어 첫 컷 전환을 강조한다."""
+
+    start = max(0, int(intro_end) - _INTRO_CLICK_LEAD_US)
+    found = _find_named_audio_segment(dc, _CLICK_SFX_MARKERS)
+    added = False
+    project = None
+    if found is None:
+        template = _find_reference_audio_template(root, _CLICK_SFX_MARKERS)
+        if template is None:
+            return {
+                "present": False,
+                "added": False,
+                "start": None,
+                "name": "",
+                "project": None,
+            }
+        cloned = _append_audio_clone(dc, template, start)
+        segment = cloned["seg"]
+        name = cloned["name"]
+        project = cloned["project"]
+        added = True
+    else:
+        segment = found["seg"]
+        name = found["material"].get("name") or ""
+        segment.setdefault("target_timerange", {})["start"] = start
+    return {
+        "present": True,
+        "added": added,
+        "start": start,
+        "name": name,
+        "project": project,
+    }
 
 
 def _set_text_keep_style(main_mat: Dict, text: str) -> None:
@@ -1307,6 +1495,45 @@ def _fill_titles(dc: Dict, title_text: str) -> int:
             _set_text_keep_style(m, wrapped)
             n += 1
     return n
+
+
+def _retime_body_title_placeholders(dc: Dict, intro_end: int,
+                                    total_us: int,
+                                    tol: int = 250_000) -> int:
+    """인트로 뒤 본문 제목을 첫 컷부터 영상 끝까지 정확히 노출한다.
+
+    인트로 제목 카드를 먼저 채운 뒤 호출하므로, 남은 제목 자리표시자는 본문
+    제목이다. 이렇게 하면 제목 TTS 길이에 따라 인트로가 늘어나도 두 제목이
+    겹치지 않는다.
+    """
+
+    materials = dc.get("materials") or {}
+    index = _index_materials(materials)
+    duration = max(1, int(total_us) - int(intro_end))
+    changed = 0
+    for track in dc.get("tracks") or []:
+        if track.get("type") != "text":
+            continue
+        for segment in track.get("segments") or []:
+            info = index.get(segment.get("material_id"))
+            if not info:
+                continue
+            if not any(
+                placeholder in _text_of(info[1])
+                for placeholder in _TITLE_PLACEHOLDERS
+            ):
+                continue
+            target = segment.setdefault("target_timerange", {})
+            if int(target.get("start") or 0) <= tol:
+                continue
+            target["start"] = int(intro_end)
+            target["duration"] = duration
+            source = segment.get("source_timerange")
+            if isinstance(source, dict):
+                source["start"] = 0
+                source["duration"] = duration
+            changed += 1
+    return changed
 
 
 def _extend_full_segments(dc: Dict, template_dur: int, total_us: int) -> None:
@@ -1836,6 +2063,7 @@ def export_via_template(guide: Dict,
     intro_template_end = _blank_intro_end(dc)
     if intro_template_end <= 0:
         intro_template_end = _INTRO_DEFAULT_US
+    start_sfx = _ensure_intro_start_sfx(dc, root)
 
     tts_enabled = bool(tts_cfg and getattr(tts_cfg, "enabled", False))
 
@@ -1858,8 +2086,12 @@ def export_via_template(guide: Dict,
             title_dur = 0
             title_reused = False
 
-    # 인트로 길이 = 제목 표시 구간과 제목 TTS 중 더 긴 쪽(대사는 그 이후 시작)
-    intro_dur = max(intro_template_end, title_dur)
+    # 시작음 뒤에 제목 TTS가 시작되도록 해 두 소리가 겹치지 않게 한다.
+    title_audio_start, intro_dur = _intro_timing(
+        intro_template_end,
+        title_dur if title_wav else 0,
+        start_sfx["end"],
+    )
 
     # 2-2) 문장(절) 단위 TTS + 자막 조각 계획 — 인트로 이후부터 배치
     #      TTS 는 문장 단위(자연 발화), 자막은 그 안에서 짧은 조각으로 노출.
@@ -1874,9 +2106,15 @@ def export_via_template(guide: Dict,
     #    나머지 제목 자리표시자(메인 제목 등)를 채운다.
     intro_filled = _fill_intro_title_card(dc, title_text, intro_template_end) \
         if title_text else 0
+    body_titles_retimed = _retime_body_title_placeholders(
+        dc,
+        intro_dur,
+        total_us,
+    )
     filled = _fill_titles(dc, title_text) if title_text else 0
     _extend_full_segments(dc, template_dur, total_us)
     _extend_intro_segments(dc, intro_template_end, intro_dur)
+    transition_click = _place_intro_transition_click(dc, root, intro_dur)
 
     # 3-1) 자막 위치/크기: 템플릿에 넣어둔 '자막 예시'가 있으면 그대로 따른다
     sample = _find_caption_sample(dc)
@@ -2024,7 +2262,11 @@ def export_via_template(guide: Dict,
         if audio_tpl is not None:
             if title_wav and Path(title_wav).is_file():
                 aseg, cloned_a = _build_audio_seg(
-                    audio_tpl, title_wav, 0, title_dur)
+                    audio_tpl,
+                    title_wav,
+                    title_audio_start,
+                    title_dur,
+                )
                 _merge_materials(mats, cloned_a)
                 audio_segs.append(aseg)
             # TTS 오디오는 문장(절) 단위로 배치(자막 조각 단위가 아님)
@@ -2106,11 +2348,23 @@ def export_via_template(guide: Dict,
         "tts_title": bool(title_wav),
         "tts_dir": str(tts_dir) if (plan["audio_ok"] or title_wav) else None,
         "intro_sec": round(intro_dur / _US, 2),
+        "title_audio_start_sec": round(title_audio_start / _US, 2),
+        "intro_start_sfx": start_sfx["present"],
+        "intro_start_sfx_name": start_sfx["name"] or None,
+        "intro_start_sfx_added": start_sfx["added"],
+        "transition_click": transition_click["present"],
+        "transition_click_name": transition_click["name"] or None,
+        "transition_click_start_sec": (
+            round(transition_click["start"] / _US, 2)
+            if transition_click["start"] is not None
+            else None
+        ),
         "caption_sample_used": sample is not None,
         "audio_clips": len(audio_segs),
         "audio_template": audio_tpl.get("project") if audio_tpl else None,
         "has_title": bool(filled or intro_filled),
         "intro_title_slots": intro_filled,
+        "body_titles_retimed": body_titles_retimed,
         "total_duration_sec": round(total_us / _US, 2),
         "tts_error": plan["first_err"],
         "registered": registered,

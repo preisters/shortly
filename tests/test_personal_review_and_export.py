@@ -28,8 +28,12 @@ from shortly.generate.capcut_export import (
     _build_photo_segment,
     _caption_pages,
     _caption_safe_korean,
+    _ensure_intro_start_sfx,
+    _intro_timing,
+    _place_intro_transition_click,
     _plan_sentences,
     _reference_asset_layout,
+    _retime_body_title_placeholders,
     _split_sentences,
 )
 from shortly.llm.base import (
@@ -343,6 +347,147 @@ class PersonalReviewAndExportTests(unittest.TestCase):
         self.assertNotRegex(
             rendered,
             r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]",
+        )
+
+    def test_intro_timing_keeps_start_sfx_and_title_tts_separate(self) -> None:
+        title_start, intro_end = _intro_timing(
+            1_000_000,
+            1_700_000,
+            733_333,
+        )
+
+        self.assertEqual(title_start, 733_333)
+        self.assertEqual(intro_end, 2_433_333)
+
+    def test_intro_sfx_and_transition_click_follow_reference_timing(self) -> None:
+        start_material = {
+            "id": "start-sfx",
+            "type": "extract_music",
+            "name": "28. 띠링 - 시작음.mp3",
+            "path": "start.mp3",
+        }
+        document = {
+            "materials": {"audios": [start_material]},
+            "tracks": [
+                {
+                    "type": "audio",
+                    "segments": [
+                        {
+                            "id": "start-segment",
+                            "material_id": "start-sfx",
+                            "extra_material_refs": [],
+                            "target_timerange": {
+                                "start": 500_000,
+                                "duration": 733_333,
+                            },
+                            "source_timerange": {
+                                "start": 0,
+                                "duration": 733_333,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "장난감이 소금빵이 돼버린 왁뿌볼"
+            reference.mkdir()
+            (reference / "draft_content.json").write_text(
+                __import__("json").dumps(
+                    {
+                        "materials": {
+                            "audios": [
+                                {
+                                    "id": "click-sfx",
+                                    "type": "extract_music",
+                                    "name": "01. 클릭음.mp3",
+                                    "path": "click.mp3",
+                                }
+                            ]
+                        },
+                        "tracks": [
+                            {
+                                "type": "audio",
+                                "segments": [
+                                    {
+                                        "id": "click-segment",
+                                        "material_id": "click-sfx",
+                                        "extra_material_refs": [],
+                                        "target_timerange": {
+                                            "start": 1_566_666,
+                                            "duration": 266_667,
+                                        },
+                                        "source_timerange": {
+                                            "start": 0,
+                                            "duration": 266_667,
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            start = _ensure_intro_start_sfx(document, root)
+            click = _place_intro_transition_click(
+                document,
+                root,
+                2_433_333,
+            )
+
+        self.assertTrue(start["present"])
+        self.assertFalse(start["added"])
+        self.assertEqual(start["end"], 733_333)
+        self.assertEqual(
+            document["tracks"][0]["segments"][0]["target_timerange"]["start"],
+            0,
+        )
+        self.assertTrue(click["present"])
+        self.assertTrue(click["added"])
+        self.assertEqual(click["start"], 2_300_000)
+        self.assertEqual(
+            document["tracks"][-1]["segments"][0]["target_timerange"],
+            {"start": 2_300_000, "duration": 266_667},
+        )
+
+    def test_body_title_starts_at_first_cut_and_ends_with_video(self) -> None:
+        body_material = {
+            "id": "body-title",
+            "content": __import__("json").dumps(
+                {"text": "제목이 들어갑니다", "styles": []}
+            ),
+        }
+        document = {
+            "materials": {"texts": [body_material]},
+            "tracks": [
+                {
+                    "type": "text",
+                    "segments": [
+                        {
+                            "material_id": "body-title",
+                            "target_timerange": {
+                                "start": 1_000_000,
+                                "duration": 9_000_000,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        changed = _retime_body_title_placeholders(
+            document,
+            2_433_333,
+            12_000_000,
+        )
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(
+            document["tracks"][0]["segments"][0]["target_timerange"],
+            {"start": 2_433_333, "duration": 9_566_667},
         )
 
     def test_capcut_segment_can_reference_generated_video(self) -> None:

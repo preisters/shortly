@@ -347,12 +347,12 @@ def _reference_asset_layout(
 
     ratio = width / height if width > 0 and height > 0 else 2 / 3
     if media_kind == "video" and ratio < 0.8:
-        return 0.8, 0.0
+        return 0.74, -0.1
     if ratio < 0.8:
-        return 0.7, -0.17
+        return 0.64, -0.21
     if ratio <= 1.2:
-        return 0.78, -0.03
-    return 0.87, 0.0
+        return 0.72, -0.12
+    return 0.8, -0.1
 
 
 def _asset_dimensions(path: Path, media_kind: str) -> Tuple[int, int]:
@@ -1327,19 +1327,67 @@ def _extend_full_segments(dc: Dict, template_dur: int, total_us: int) -> None:
                     src["duration"] = total_us
 
 
+_QUOTE_PAIRS = {
+    "'": "'",
+    '"': '"',
+    "‘": "’",
+    "“": "”",
+}
+
+
 def _split_sentences(text: str) -> List[str]:
     """나레이션을 TTS 자연 발화 단위(문장/절)로 분할.
 
-    문장부호(. ! ? …)와 쉼표(,) 뒤에서 끊어, 수동 편집에서 쓰던 '절 단위'와
-    맞춘다. 자막 표시 조각(_split_display_units)보다 큰 단위라, 문장을 강제로
-    잘게 찢어 TTS 하던 기존 방식의 어색한 억양·큰 공백을 방지한다.
+    문장 종결부호에서만 끊고 쉼표는 같은 발화로 유지한다. 따옴표 안의 물음표나
+    느낌표는 분리하지 않아 인용문 전체를 한 자막 화면 안에서 계획할 수 있게 한다.
     """
     text = re.sub(r"\s+", " ", (text or "").strip())
     if not text:
         return []
-    marked = re.sub(r"([.!?…。,，、])", lambda m: m.group(1) + "\x00", text)
-    parts = [p.strip() for p in marked.split("\x00") if p.strip()]
+    parts: List[str] = []
+    start = 0
+    quote_end: Optional[str] = None
+    for index, char in enumerate(text):
+        if quote_end is not None:
+            if char == quote_end:
+                quote_end = None
+            continue
+        if char in _QUOTE_PAIRS:
+            quote_end = _QUOTE_PAIRS[char]
+            continue
+        if char in ".!?…。":
+            part = text[start:index + 1].strip()
+            if part:
+                parts.append(part)
+            start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
     return parts or [text]
+
+
+def _caption_pages(text: str, line_limit: int = 22) -> List[List[str]]:
+    """인용문을 보존하면서 한 화면당 최대 두 줄의 의미 단위로 묶는다."""
+
+    normalized = re.sub(r"\s+", " ", (text or "").strip())
+    if not normalized:
+        return []
+    tokens = re.findall(
+        r"""(?:"[^"]*"|'[^']*'|“[^”]*”|‘[^’]*’|\S+)""",
+        normalized,
+    )
+    lines: List[str] = []
+    current = ""
+    for token in tokens:
+        candidate = f"{current} {token}".strip()
+        if current and len(candidate) > line_limit:
+            lines.append(current)
+            current = token
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return [lines[index:index + 2] for index in range(0, len(lines), 2)]
 
 
 def _plan_sentences(segments: List[Dict], cfg, tts_dir: Path,
@@ -1347,7 +1395,8 @@ def _plan_sentences(segments: List[Dict], cfg, tts_dir: Path,
     """문장(절) 단위로 TTS 를 만들고, 각 문장 구간 안에 자막 조각을 분배한다.
 
     - TTS: 문장/절 단위(자연 발화) → 어색한 끊김/큰 공백 감소.
-    - 자막: 각 문장을 짧은 표시 조각으로 쪼개 TTS 길이에 비례해 순차 배치.
+    - 자막: 의미 단위로 최대 두 줄을 묶고, 첫 줄을 유지한 상태에서 TTS 진행에
+      맞춰 두 번째 줄을 추가한다. 따옴표 안 문장은 중간에서 끊지 않는다.
     start_offset: 첫 문장이 시작할 시각(us). 제목(인트로) 이후부터 시작할 때 사용.
     반환: captions(자막 조각), audios(문장 TTS), 총 길이 등.
     """
@@ -1388,16 +1437,52 @@ def _plan_sentences(segments: List[Dict], cfg, tts_dir: Path,
             plain = re.sub(r"\s", "", sent["text"])
             dur = max(700_000, int(len(plain) * 135_000))
 
-        # 문장을 표시용 조각으로 쪼개 TTS 구간 [cursor, cursor+dur] 에 비례 배치
-        frags = _split_display_units(sent["text"]) or [sent["text"]]
-        total_len = sum(len(f) for f in frags) or 1
+        pages = _caption_pages(sent["text"]) or [[sent["text"]]]
+        total_len = sum(
+            sum(len(line) for line in page)
+            for page in pages
+        ) or 1
         acc = 0
-        for f in frags:
-            f_start = cursor + int(round(dur * acc / total_len))
-            acc += len(f)
-            f_end = cursor + int(round(dur * acc / total_len))
-            captions.append({"seg": sent["seg"], "text": f, "start": f_start,
-                             "dur": max(300_000, f_end - f_start)})
+        for page in pages:
+            page_len = sum(len(line) for line in page) or 1
+            page_start = cursor + int(round(dur * acc / total_len))
+            acc += page_len
+            page_end = cursor + int(round(dur * acc / total_len))
+            page_duration = max(300_000, page_end - page_start)
+            if len(page) == 1:
+                captions.append(
+                    {
+                        "seg": sent["seg"],
+                        "text": page[0],
+                        "start": page_start,
+                        "dur": page_duration,
+                        "layer": 0,
+                    }
+                )
+                continue
+            first, second = page
+            captions.append(
+                {
+                    "seg": sent["seg"],
+                    "text": first + "\n",
+                    "start": page_start,
+                    "dur": page_duration,
+                    "layer": 0,
+                }
+            )
+            second_start = page_start + int(
+                round(page_duration * len(first) / max(page_len, 1))
+            )
+            second_start = min(second_start, page_end - 300_000)
+            captions.append(
+                {
+                    "seg": sent["seg"],
+                    "text": "\n" + second,
+                    "start": second_start,
+                    "dur": page_end - second_start,
+                    "layer": 1,
+                }
+            )
         audios.append({"seg": sent["seg"], "text": sent["text"],
                        "start": cursor, "dur": dur, "wav": wav})
         cursor += dur + _TTS_GAP_US
@@ -1669,6 +1754,7 @@ def export_via_template(guide: Dict,
 
     # 4) 자막 트랙 + 추천 메모 트랙
     caption_segs: List[Dict] = []
+    caption_layers: Dict[int, List[Dict]] = {}
     reco_segs: List[Dict] = []
     seg_span: Dict[int, List[int]] = {}
     for unit in units:
@@ -1688,6 +1774,7 @@ def export_via_template(guide: Dict,
                 u["start"], u["dur"], cap_y, render_index=20000 + k)
             _merge_materials(mats, cloned)
             caption_segs.append(cseg)
+            caption_layers.setdefault(int(u.get("layer") or 0), []).append(cseg)
 
         # 세그먼트별 추천(이미지/매체/효과)을 메모 텍스트로 하단에 배치
         # 세그먼트를 추천 컷 수만큼 나눠 '컷별' 메모를 배치(소스 컷 수와 맞춤)
@@ -1725,7 +1812,7 @@ def export_via_template(guide: Dict,
                 reco_segs.append(rseg)
 
     # 5) 선택된 생성 에셋. 원본 종횡비를 유지하고, 지정 레퍼런스 프로젝트의
-    # 수동 조정 중앙값(세로 1.0 / 정방형 0.78 / 가로 0.87)을 적용한다.
+    # 수동 조정 분포를 기준으로 하되 두 줄 자막 안전 영역만큼 축소·하향한다.
     cut_segs: List[Dict] = []
     reference_template = _pick_reference_image_template(root)
     if reference_template is None:
@@ -1818,8 +1905,8 @@ def export_via_template(guide: Dict,
         tracks.append(_track("video", cut_segs))
     if reco_segs:
         tracks.append(_track("text", reco_segs))
-    if caption_segs:
-        tracks.append(_track("text", caption_segs))
+    for layer in sorted(caption_layers):
+        tracks.append(_track("text", caption_layers[layer]))
     if audio_segs:
         tracks.append(_track("audio", audio_segs))
 

@@ -26,7 +26,10 @@ from shortly.core.domain.assets import (
 from shortly.core.use_cases.build_cut_manifest import build_cut_manifest
 from shortly.generate.capcut_export import (
     _build_photo_segment,
+    _caption_pages,
+    _plan_sentences,
     _reference_asset_layout,
+    _split_sentences,
 )
 from shortly.llm.base import (
     LLMClient,
@@ -230,13 +233,53 @@ class PersonalReviewAndExportTests(unittest.TestCase):
         )
 
     def test_reference_layout_follows_manual_aspect_ratio_medians(self) -> None:
-        self.assertEqual(_reference_asset_layout(1024, 1536), (0.7, -0.17))
+        self.assertEqual(_reference_asset_layout(1024, 1536), (0.64, -0.21))
         self.assertEqual(
             _reference_asset_layout(1080, 1920, "video"),
-            (0.8, 0.0),
+            (0.74, -0.1),
         )
-        self.assertEqual(_reference_asset_layout(1000, 1000), (0.78, -0.03))
-        self.assertEqual(_reference_asset_layout(1280, 720), (0.87, 0.0))
+        self.assertEqual(_reference_asset_layout(1000, 1000), (0.72, -0.12))
+        self.assertEqual(_reference_asset_layout(1280, 720), (0.8, -0.1))
+
+    def test_caption_planner_preserves_quoted_sentence(self) -> None:
+        text = "사실 처음 먹어보면 '어? 이거 어디서 먹어본 맛인데?' 싶다고"
+
+        self.assertEqual(_split_sentences(text), [text])
+        pages = _caption_pages(text)
+
+        self.assertTrue(
+            any(
+                "'어? 이거 어디서 먹어본 맛인데?'" in line
+                for page in pages
+                for line in page
+            )
+        )
+
+    def test_two_line_caption_accumulates_with_tts_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            plan = _plan_sentences(
+                [
+                    {
+                        "narration": (
+                            "요즘 난리난 상하이 버터떡, "
+                            "언론이 억지로 밀어버린 거라고 함"
+                        )
+                    }
+                ],
+                None,
+                Path(temporary),
+            )
+
+        first, second = plan["captions"][:2]
+        self.assertTrue(first["text"].endswith("\n"))
+        self.assertTrue(second["text"].startswith("\n"))
+        self.assertEqual(first["layer"], 0)
+        self.assertEqual(second["layer"], 1)
+        self.assertGreater(second["start"], first["start"])
+        self.assertEqual(
+            first["start"] + first["dur"],
+            second["start"] + second["dur"],
+        )
 
     def test_capcut_segment_can_reference_generated_video(self) -> None:
         template = {

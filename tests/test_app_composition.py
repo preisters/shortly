@@ -46,6 +46,30 @@ class _FakeService:
     "FastAPI runtime dependencies are unavailable",
 )
 class AppCompositionTests(unittest.TestCase):
+    def test_legacy_web_command_selects_personal_app_with_asset_page(self) -> None:
+        with isolated_shortly_env(SHORTLY_PRODUCT="personal"):
+            runtime_app = legacy_app._create_runtime_app(Settings.load())
+            with TestClient(
+                runtime_app,
+                client=("127.0.0.1", 50000),
+            ) as client:
+                response = client.get(
+                    "/personal/assets",
+                    params={
+                        "channel": "@fixture",
+                        "name": "saved-guide",
+                    },
+                )
+
+        routes = set(route_manifest(runtime_app))
+        self.assertEqual(runtime_app.state.product, ProductKind.PERSONAL.value)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(("GET", "/personal/assets"), routes)
+        self.assertIn(
+            ("POST", "/api/personal/manifests/from-guide"),
+            routes,
+        )
+
     def test_product_factories_share_legacy_routes_and_personal_adds_automation(self) -> None:
         with isolated_shortly_env():
             team = create_team_app()

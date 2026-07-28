@@ -403,6 +403,9 @@ async function loadSavedGuides() {
       del.textContent = "삭제";
       del.onclick = (e) => { e.stopPropagation(); deleteSavedGuide(channel, g.name, g.title); };
       li.appendChild(info);
+      /* shortly:local-script:start */
+      addPersonalAssetAutomation(li, channel, g.name, true);
+      /* shortly:local-script:end */
       li.appendChild(del);
       list.appendChild(li);
     });
@@ -464,13 +467,14 @@ function addCapcutExport(container, channel, name) {
 }
 
 /* shortly:local-script:start */
-function addPersonalAssetAutomation(container, channel, name) {
+function addPersonalAssetAutomation(container, channel, name, compact = false) {
   const link = document.createElement("a");
-  link.className = "download";
+  link.className = compact ? "g-assets secondary" : "download";
   link.href =
     `/personal/assets?channel=${encodeURIComponent(channel)}` +
     `&name=${encodeURIComponent(name)}`;
-  link.textContent = "생성 에셋 검토·자동 배치";
+  link.textContent = compact ? "에셋 자동화" : "생성 에셋 검토·자동 배치";
+  link.onclick = (event) => event.stopPropagation();
   container.appendChild(link);
 }
 /* shortly:local-script:end */

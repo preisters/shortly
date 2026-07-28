@@ -138,6 +138,11 @@ button.download.capcut-export:disabled { opacity: .6; cursor: default; }
   background: #2a2f3a; color: var(--err);
 }
 .guide-list .g-delete:hover { background: #3a2530; filter: none; }
+.guide-list .g-assets {
+  flex: none; padding: 6px 10px; font-size: 12.5px; text-decoration: none;
+  border: 1px solid var(--border); border-radius: 7px; color: var(--accent);
+}
+.guide-list .g-assets:hover { border-color: var(--accent); }
 
 .revise-box:empty { display: none; }
 .revise-panel {

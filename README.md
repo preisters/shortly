@@ -43,7 +43,7 @@ pip install -r requirements.txt
 제품별 실행 엔트리포인트:
 
 ```bash
-# 기존 호환 실행(legacy)
+# 기존 호환 명령(로컬에서는 personal composition root 사용)
 python -m shortly web
 
 # 개인 자동화판 로컬 웹 앱
@@ -52,7 +52,7 @@ python -m shortly.apps.personal.launcher
 # 팀판은 portable 패키지의 기존 시작 파일이 team composition root를 사용
 ```
 
-팀판의 LLM 레지스트리는 현재 Anthropic만 등록합니다. 개인판과 legacy 실행은
+팀판의 LLM 레지스트리는 현재 Anthropic만 등록합니다. 개인판과 호환 실행은
 Gemini, OpenAI, Anthropic 및 OpenAI-compatible 로컬 서버 연결을 유지합니다.
 팀 포터블 빌드는 개인판 앱과 로컬 LLM 어댑터를 산출물에서 제외합니다.
 
@@ -156,6 +156,10 @@ python -m shortly web
 # 이 PC:  http://localhost:8756
 # 같은 공유기의 다른 PC: http://<이 PC의 LAN IP>:8756  (실행 시 주소를 안내합니다)
 ```
+
+로컬 `web` 명령은 개인판을 실행하므로 저장된 가이드의 생성 에셋 검토·자동 배치
+기능도 함께 제공합니다. 비용이 발생하는 개인 자동화 API는 이 PC의 loopback
+접속에서만 허용됩니다.
 
 기본으로 `0.0.0.0` 에 바인딩되어 **같은 공유기(LAN)의 다른 PC/휴대폰에서도 접속**할 수 있습니다. 다른 기기는 화면만 볼 뿐, **다운로드·분석 등 모든 처리는 이 PC(서버)에서** 수행됩니다.
 

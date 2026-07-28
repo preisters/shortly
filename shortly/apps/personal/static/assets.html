@@ -12,6 +12,9 @@
     textarea{width:100%;min-height:170px;box-sizing:border-box}
     button{cursor:pointer;background:#4659d8} button.secondary{background:#303445}
     .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.muted{color:#a7abba}.error{color:#ff8e8e}
+    .asset-guide{line-height:1.6;color:#c9ccda}.asset-guide b{color:#fff}
+    .reason{min-width:220px;color:#b9bdca;font-size:13px;line-height:1.45}
+    .fact{display:inline-block;margin-top:4px;padding:2px 6px;border-radius:4px;background:#5b3030;color:#ffd1d1;font-size:11px}
     pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0d0e12;padding:14px;border-radius:8px}
     table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #303341;text-align:left}
   </style>
@@ -27,6 +30,12 @@
   </section>
   <section>
     <h2>2. 컷 유형과 생성</h2>
+    <ul class="asset-guide">
+      <li><b>AI 이미지/영상 생성 권장</b>: 사실성 제약이 없고 스톡으로 정확히 찾기 어려운 연출 컷</li>
+      <li><b>스톡 이미지</b>: 일반 자료사진으로 충분히 확보 가능한 컷이며 현재는 사람이 검색·삽입</li>
+      <li><b>실제 이미지</b>: 제품·인물·사건의 원본 사진을 직접 확보해야 하는 컷</li>
+      <li><b>수동 삽입 필요</b>: 사실성이 중요하거나 자동 확보 수단이 없는 컷이며 AI 생성 비권장</li>
+    </ul>
     <div id="cuts" class="muted">컷 명세를 먼저 생성하세요.</div>
   </section>
   <section>
@@ -49,6 +58,16 @@
   </section>
   <script>
     let manifest=null, preparedExport=null, automationStatus=null;
+    const assetTypes=["real_image","stock_image","generated_image","generated_video","meme","screenshot","manual_required"];
+    const assetLabels={
+      real_image:"실제 이미지 · 직접 확보",
+      stock_image:"스톡 이미지 · 검색/삽입",
+      generated_image:"AI 이미지 생성 · 권장",
+      generated_video:"AI 영상 생성 · 권장",
+      meme:"밈/짤 · 직접 선택",
+      screenshot:"스크린샷 · 직접 캡처",
+      manual_required:"수동 삽입 필요 · AI 비권장"
+    };
     const result=document.querySelector("#result");
     async function api(path,options={}){
       const response=await fetch(path,{headers:{"Content-Type":"application/json"},...options});
@@ -64,10 +83,10 @@
       document.querySelector("#manifest-id").textContent=manifest?.manifest_id||"";
       const target=document.querySelector("#cuts");
       if(!manifest){target.textContent="컷 명세를 먼저 생성하세요.";return}
-      target.innerHTML="<table><thead><tr><th>컷</th><th>프롬프트</th><th>유형</th><th>상태</th><th>실행</th></tr></thead><tbody>"+
+      target.innerHTML="<table><thead><tr><th>컷</th><th>프롬프트</th><th>권장 유형</th><th>판정 이유</th><th>상태</th><th>실행</th></tr></thead><tbody>"+
         manifest.cuts.map(c=>`<tr><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.prompt)}</td><td><select data-cut="${escapeHtml(c.id)}">
-        ${["real_image","stock_image","generated_image","generated_video","meme","screenshot","manual_required"].map(v=>`<option ${v===c.asset_type?"selected":""}>${v}</option>`).join("")}
-        </select></td><td>${c.selected_candidate_id?"선택됨":"대기"}</td><td>${c.asset_type.startsWith("generated_")?`<button data-generate="${escapeHtml(c.id)}">비용 확인·생성</button>`:"수동/검색"}</td></tr>`).join("")+"</tbody></table>";
+        ${assetTypes.map(v=>`<option value="${v}" ${v===c.asset_type?"selected":""}>${assetLabels[v]}</option>`).join("")}
+        </select></td><td class="reason">${escapeHtml((c.notes||[]).join(" "))}${c.fact_sensitive?'<br><span class="fact">사실성 보호</span>':""}</td><td>${c.selected_candidate_id?"선택됨":"대기"}</td><td>${c.asset_type.startsWith("generated_")?`<button data-generate="${escapeHtml(c.id)}">비용 확인·생성</button>`:c.asset_type==="stock_image"?"스톡 검색·수동 삽입":c.asset_type==="real_image"?"원본 직접 확보":"수동 처리"}</td></tr>`).join("")+"</tbody></table>";
       target.querySelectorAll("select").forEach(el=>el.onchange=async()=>{
         try{await api(`/api/personal/manifests/${manifest.manifest_id}/cuts/${el.dataset.cut}`,{method:"PATCH",body:JSON.stringify({asset_type:el.value})});manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);render()}catch(e){result.textContent=e.message}
       });
@@ -117,7 +136,7 @@
         const imported=await api("/api/personal/manifests/from-guide",{method:"POST",body:JSON.stringify({channel,name})});
         manifest=imported.manifest;
         document.querySelector("#guide").value=JSON.stringify(imported.guide,null,2);
-        sourceStatus.textContent=`저장된 가이드 연결됨: ${channel} / ${name}${imported.reused?" · 기존 작업 재개":" · 새 작업"}`;
+        sourceStatus.textContent=`저장된 가이드 연결됨: ${channel} / ${name}${imported.defaults_refreshed?" · 추천 기본값 갱신":imported.reused?" · 기존 작업 재개":" · 새 작업"}`;
         const next=new URL(window.location.href);
         next.searchParams.set("manifest_id",manifest.manifest_id);
         window.history.replaceState({}, "", next);

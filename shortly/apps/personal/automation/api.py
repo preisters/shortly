@@ -11,7 +11,10 @@ from pydantic import BaseModel, Field
 
 from ....config import get_settings
 from ....core.domain.assets import AssetType, MediaKind
-from ....core.use_cases.build_cut_manifest import build_cut_manifest
+from ....core.use_cases.build_cut_manifest import (
+    ASSET_CLASSIFIER_VERSION,
+    build_cut_manifest,
+)
 from ....llm import get_llm
 from ..assets import GoogleVideoProvider, OpenAIImageProvider
 from ..local_llm import LOCAL_PROVIDER_NAMES
@@ -109,6 +112,39 @@ def create_automation_components(base_settings=None):
     return settings, store, executor
 
 
+def _refresh_untouched_classification(
+    store: AutomationStore,
+    existing,
+    candidate,
+):
+    """Upgrade default recommendations without overwriting human or paid work."""
+
+    current_version = int(
+        existing.metadata.get("asset_classifier_version") or 0
+    )
+    if current_version >= ASSET_CLASSIFIER_VERSION:
+        return existing, False
+    has_work = (
+        bool(store.list_jobs(manifest_id=existing.manifest_id))
+        or bool(store.selection_history(existing.manifest_id))
+        or any(
+            cut.candidates or cut.selected_candidate_id
+            for cut in existing.cuts
+        )
+    )
+    if has_work:
+        return existing, False
+    candidate.manifest_id = existing.manifest_id
+    candidate.created_at = existing.created_at
+    candidate.metadata = {
+        **existing.metadata,
+        **candidate.metadata,
+        "classification_refreshed_from": current_version,
+    }
+    store.save_manifest(candidate)
+    return candidate, True
+
+
 def create_router(
     settings: PersonalAutomationSettings,
     store: AutomationStore,
@@ -175,6 +211,7 @@ def create_router(
                 candidate.source_guide_hash
             )
             reused = manifest is not None
+            defaults_refreshed = False
             if manifest is None:
                 manifest = candidate
                 manifest.metadata.update(
@@ -184,10 +221,19 @@ def create_router(
                     }
                 )
                 store.save_manifest(manifest)
+            else:
+                manifest, defaults_refreshed = (
+                    _refresh_untouched_classification(
+                        store,
+                        manifest,
+                        candidate,
+                    )
+                )
             return {
                 "manifest": manifest.to_dict(),
                 "guide": guide,
                 "reused": reused,
+                "defaults_refreshed": defaults_refreshed,
             }
         except Exception as exc:
             raise _error(exc) from exc

@@ -14,6 +14,7 @@ from ..domain.assets import (
     MediaKind,
 )
 
+ASSET_CLASSIFIER_VERSION = 2
 
 _FACT_TERMS = (
     "실제",
@@ -26,15 +27,63 @@ _FACT_TERMS = (
     "증거",
     "정확",
     "공식",
+    "보도",
+    "기사",
+    "인터뷰",
+    "발언",
+    "로고",
+    "브랜드",
+    "포장지",
+    "회사 전경",
     "fact",
     "real person",
     "product",
 )
 _SCREENSHOT_TERMS = ("스크린샷", "화면 캡처", "screen shot", "screenshot")
-_MEME_TERMS = ("밈", "meme", "짤")
-_GENERATED_TERMS = ("생성", "일러스트", "상상", "concept", "illustration")
+_MEME_TERMS = ("밈", "meme", "짤방", "반응 짤")
+_GENERATED_TERMS = (
+    "ai 생성",
+    "생성",
+    "일러스트",
+    "상상",
+    "합성",
+    "상징",
+    "암시",
+    "의인화",
+    "캐릭터",
+    "초현실",
+    "비현실",
+    "과장",
+    "판타지",
+    "그래픽",
+    "인포그래픽",
+    "애니메이션",
+    "만화",
+    "3d",
+    "concept",
+    "illustration",
+)
 _REAL_TERMS = ("실사", "실제 사진", "원본 사진", "real photo")
 _VIDEO_TERMS = ("영상", "비디오", "움짤", "video", "motion", "clip")
+_PHOTO_TERMS = ("사진", "포토", "photo")
+_STOCK_TERMS = (
+    "스톡",
+    "자료 사진",
+    "자료사진",
+    "아카이브",
+    "배경 사진",
+    "도시 전경",
+    "거리 풍경",
+    "자연 풍경",
+    "시장 전경",
+    "매장 전경",
+    "건물 외관",
+    "일상 장면",
+    "b-roll",
+    "b roll",
+    "stock",
+    "archive",
+)
 
 
 def _pick(items: Any, index: int) -> str:
@@ -56,32 +105,59 @@ def classify_asset_type(
     narration: str,
     fact_sensitive: Optional[bool] = None,
 ) -> tuple[AssetType, MediaKind, bool, list[str]]:
-    """Apply conservative deterministic rules before any optional LLM review."""
+    """Choose an AI-first default while preserving factual-source boundaries."""
 
     combined = " ".join((prompt, media_hint, narration))
+    visual_context = " ".join((prompt, media_hint)).strip()
     is_fact_sensitive = (
-        _contains(combined, _FACT_TERMS)
+        _contains(visual_context or narration, _FACT_TERMS)
         if fact_sensitive is None
         else bool(fact_sensitive)
     )
     notes: list[str] = []
-    if is_fact_sensitive:
-        notes.append("사실성이 중요한 컷은 자동 생성하지 않습니다.")
-        return AssetType.MANUAL_REQUIRED, MediaKind.IMAGE, True, notes
     if _contains(combined, _SCREENSHOT_TERMS):
-        return AssetType.SCREENSHOT, MediaKind.IMAGE, False, notes
+        notes.append("원본 화면을 직접 캡처해야 하는 컷입니다.")
+        return AssetType.SCREENSHOT, MediaKind.IMAGE, is_fact_sensitive, notes
     if _contains(combined, _MEME_TERMS):
-        return AssetType.MEME, MediaKind.IMAGE, False, notes
+        notes.append("맥락에 맞는 밈·짤을 사람이 선택하는 컷입니다.")
+        return AssetType.MEME, MediaKind.IMAGE, is_fact_sensitive, notes
+    if is_fact_sensitive:
+        if _contains(media_hint, _VIDEO_TERMS):
+            notes.append(
+                "사실성이 중요한 영상은 원본·라이선스 영상을 직접 확보해야 합니다."
+            )
+            return AssetType.MANUAL_REQUIRED, MediaKind.VIDEO, True, notes
+        if _contains(prompt, _PHOTO_TERMS + _REAL_TERMS):
+            notes.append(
+                "실제 제품·인물·사건을 보여 주므로 원본 사진을 직접 확보해야 합니다."
+            )
+            return AssetType.REAL_IMAGE, MediaKind.IMAGE, True, notes
+        notes.append(
+            "사실성이 중요한 컷이라 AI 생성 대신 검증된 원본을 직접 넣어야 합니다."
+        )
+        return AssetType.MANUAL_REQUIRED, MediaKind.IMAGE, True, notes
     if _contains(media_hint, _VIDEO_TERMS):
-        if _contains(combined, _GENERATED_TERMS):
-            return AssetType.GENERATED_VIDEO, MediaKind.VIDEO, False, notes
-        notes.append("기존 영상 검색 또는 수동 삽입이 필요합니다.")
-        return AssetType.MANUAL_REQUIRED, MediaKind.VIDEO, False, notes
+        if _contains(combined, _STOCK_TERMS):
+            notes.append(
+                "일반 자료 영상으로 확보 가능한 컷이지만 스톡 영상 자동 검색은 아직 지원하지 않습니다."
+            )
+            return AssetType.MANUAL_REQUIRED, MediaKind.VIDEO, False, notes
+        notes.append(
+            "스톡으로 찾기 어려운 연출 컷이라 AI 영상 생성을 기본 추천합니다."
+        )
+        return AssetType.GENERATED_VIDEO, MediaKind.VIDEO, False, notes
     if _contains(combined, _REAL_TERMS):
+        notes.append("원본 또는 직접 촬영한 실제 이미지를 사용하는 컷입니다.")
         return AssetType.REAL_IMAGE, MediaKind.IMAGE, False, notes
-    if _contains(combined, _GENERATED_TERMS):
-        return AssetType.GENERATED_IMAGE, MediaKind.IMAGE, False, notes
-    return AssetType.STOCK_IMAGE, MediaKind.IMAGE, False, notes
+    if _contains(combined, _STOCK_TERMS):
+        notes.append(
+            "일반 자료화면으로 충분히 확보 가능한 컷이라 스톡 이미지 검색을 추천합니다."
+        )
+        return AssetType.STOCK_IMAGE, MediaKind.IMAGE, False, notes
+    notes.append(
+        "사실성 제약이 없고 스톡으로 정확히 찾기 어려운 컷이라 AI 이미지 생성을 기본 추천합니다."
+    )
+    return AssetType.GENERATED_IMAGE, MediaKind.IMAGE, False, notes
 
 
 def build_cut_manifest(
@@ -155,6 +231,7 @@ def build_cut_manifest(
         source_guide_hash=hashlib.sha256(canonical).hexdigest(),
         metadata={
             "source_schema": "legacy-guide-dict",
+            "asset_classifier_version": ASSET_CLASSIFIER_VERSION,
             "total_duration_sec": float(
                 guide.get("total_duration_sec") or 0.0
             ),

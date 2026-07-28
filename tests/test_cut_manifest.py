@@ -68,10 +68,43 @@ class CutManifestTests(unittest.TestCase):
             media_hint="사진",
             narration="공식 제품을 보여준다",
         )
-        self.assertEqual(asset_type, AssetType.MANUAL_REQUIRED)
+        self.assertEqual(asset_type, AssetType.REAL_IMAGE)
         self.assertEqual(media, MediaKind.IMAGE)
         self.assertTrue(fact_sensitive)
         self.assertTrue(notes)
+
+    def test_unique_non_factual_scene_defaults_to_generated_image(self) -> None:
+        asset_type, media, fact_sensitive, notes = classify_asset_type(
+            prompt="황금알을 낳는 거위가 수출 시장을 걷어차는 장면",
+            media_hint="사진",
+            narration="비유를 시각적으로 보여준다",
+        )
+        self.assertEqual(asset_type, AssetType.GENERATED_IMAGE)
+        self.assertEqual(media, MediaKind.IMAGE)
+        self.assertFalse(fact_sensitive)
+        self.assertIn("AI 이미지", notes[0])
+
+    def test_generic_reference_scene_defaults_to_stock_image(self) -> None:
+        asset_type, media, fact_sensitive, notes = classify_asset_type(
+            prompt="도쿄 시장 전경 자료 사진",
+            media_hint="사진",
+            narration="시장 규모를 소개한다",
+        )
+        self.assertEqual(asset_type, AssetType.STOCK_IMAGE)
+        self.assertEqual(media, MediaKind.IMAGE)
+        self.assertFalse(fact_sensitive)
+        self.assertIn("스톡", notes[0])
+
+    def test_non_factual_motion_scene_defaults_to_generated_video(self) -> None:
+        asset_type, media, fact_sensitive, notes = classify_asset_type(
+            prompt="김 캐릭터가 세계 지도를 달리는 과장된 장면",
+            media_hint="영상/움짤",
+            narration="성장세를 재미있게 표현한다",
+        )
+        self.assertEqual(asset_type, AssetType.GENERATED_VIDEO)
+        self.assertEqual(media, MediaKind.VIDEO)
+        self.assertFalse(fact_sensitive)
+        self.assertIn("AI 영상", notes[0])
 
     def test_explicit_override_is_recorded(self) -> None:
         manifest = build_cut_manifest(
@@ -120,7 +153,24 @@ class CutManifestTests(unittest.TestCase):
                             "name": "saved-guide",
                         },
                     )
+                    store = app.state.personal_automation["store"]
+                    old_manifest = store.load_manifest(
+                        first.json()["manifest"]["manifest_id"]
+                    )
+                    old_manifest.metadata.pop(
+                        "asset_classifier_version",
+                        None,
+                    )
+                    old_manifest.cuts[0].asset_type = AssetType.STOCK_IMAGE
+                    store.save_manifest(old_manifest)
                     second = client.post(
+                        "/api/personal/manifests/from-guide",
+                        json={
+                            "channel": "@fixture",
+                            "name": "saved-guide",
+                        },
+                    )
+                    third = client.post(
                         "/api/personal/manifests/from-guide",
                         json={
                             "channel": "@fixture",
@@ -134,9 +184,16 @@ class CutManifestTests(unittest.TestCase):
         second_body = second.json()
         self.assertFalse(first_body["reused"])
         self.assertTrue(second_body["reused"])
+        self.assertTrue(second_body["defaults_refreshed"])
+        self.assertTrue(third.json()["reused"])
+        self.assertFalse(third.json()["defaults_refreshed"])
         self.assertEqual(
             first_body["manifest"]["manifest_id"],
             second_body["manifest"]["manifest_id"],
+        )
+        self.assertEqual(
+            second_body["manifest"]["cuts"][0]["asset_type"],
+            AssetType.GENERATED_IMAGE.value,
         )
         self.assertEqual(
             first_body["manifest"]["metadata"]["source_channel"],

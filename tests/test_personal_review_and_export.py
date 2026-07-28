@@ -22,7 +22,11 @@ from shortly.core.domain.assets import (
 )
 from shortly.core.use_cases.build_cut_manifest import build_cut_manifest
 from shortly.generate.capcut_export import _build_photo_segment
-from shortly.llm.base import LLMClient
+from shortly.llm.base import (
+    LLMClient,
+    LLMError,
+    LLMResponseParseError,
+)
 
 
 class _ReviewLlm(LLMClient):
@@ -34,6 +38,16 @@ class _ReviewLlm(LLMClient):
 
     def complete_json(self, *args, **kwargs):
         return {"passed": True, "summary": "ok", "findings": []}
+
+
+class _FailedReviewLlm(_ReviewLlm):
+    def complete_json(self, *args, **kwargs):
+        raise LLMError("connection refused")
+
+
+class _MalformedReviewLlm(_ReviewLlm):
+    def complete_json(self, *args, **kwargs):
+        raise LLMResponseParseError("invalid json")
 
 
 class PersonalReviewAndExportTests(unittest.TestCase):
@@ -48,6 +62,30 @@ class PersonalReviewAndExportTests(unittest.TestCase):
         self.assertTrue(report.passed)
         self.assertEqual(report.reviewer, "local-qwen:qwen-fixture")
         self.assertEqual(manifest.to_dict(), before)
+
+    def test_qwen_review_distinguishes_request_and_parse_failures(self) -> None:
+        manifest = build_cut_manifest(
+            {"title": "fixture", "segments": [{"duration_sec": 1}]}
+        )
+
+        request_failure = qwen_read_only_review(
+            _FailedReviewLlm(),
+            manifest,
+        )
+        parse_failure = qwen_read_only_review(
+            _MalformedReviewLlm(),
+            manifest,
+        )
+
+        self.assertEqual(
+            request_failure.findings[0].code,
+            "local_model_request_failed",
+        )
+        self.assertIn("LM Studio", request_failure.findings[0].message)
+        self.assertEqual(
+            parse_failure.findings[0].code,
+            "review_parse_failed",
+        )
 
     def test_prepare_export_validates_selected_assets_without_capcut_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

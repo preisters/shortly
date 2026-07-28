@@ -24,6 +24,7 @@ class SettingsContractTests(unittest.TestCase):
         self.assertEqual(settings.data_dir, config.PROJECT_ROOT / "data")
         self.assertEqual(settings.host, "0.0.0.0")
         self.assertEqual(settings.port, 8756)
+        self.assertTrue(settings.local_auto_unload)
 
     def test_portable_profile_forces_provider_models_and_user_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

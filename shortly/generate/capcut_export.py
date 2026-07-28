@@ -538,15 +538,15 @@ def _build_text_segment(text_tpl: Dict, text: str, start_us: int, dur_us: int,
 
 def _build_photo_segment(image_tpl: Dict, img_path: Path, start_us: int,
                          dur_us: int, scale: float, y: float,
-                         render_index: int):
+                         render_index: int, media_kind: str = "image"):
     """컷/배경 이미지용 photo 세그먼트 1개를 생성(세그먼트, 복제소재)."""
     seg, cloned, main = _clone_seg(image_tpl["seg"], image_tpl["materials"])
     if main is not None:
-        main["type"] = "photo"
+        main["type"] = "video" if media_kind == "video" else "photo"
         main["path"] = str(img_path).replace("\\", "/")
         main["width"] = _CANVAS_W
         main["height"] = _CANVAS_H
-        main["duration"] = _PHOTO_DURATION
+        main["duration"] = dur_us if media_kind == "video" else _PHOTO_DURATION
         main["has_audio"] = False
         main["material_name"] = img_path.name
         for pk in ("media_path", "reverse_path", "intensifies_path",
@@ -653,13 +653,15 @@ def _match_anim(catalog: List[Dict], effect: str) -> Optional[Dict]:
 
 def export_to_capcut_project(guide: Dict,
                              root_override: Optional[str] = None,
-                             layout: Optional[Dict] = None) -> Dict:
+                             layout: Optional[Dict] = None,
+                             cut_assets: Optional[Dict[str, Dict]] = None) -> Dict:
     """가이드를 이 PC 의 CapCut 프로젝트 폴더로 내보내(초안 생성) 결과를 반환.
 
     layout: 학습된 채널의 화면 레이아웃(제목/이미지/자막 영역, 정규화 좌표).
             제공되면 제목/자막/이미지 위치·크기를 소스에 맞춰 배치합니다.
     """
     lp = _layout_params(layout)
+    cut_assets = cut_assets or {}
     root = find_capcut_draft_root(root_override)
     if root is None:
         return {"ok": False,
@@ -775,12 +777,26 @@ def export_to_capcut_project(guide: Dict,
                 c_start = seg_start + int(round(c * seg_dur / n_cuts))
                 c_end = seg_start + int(round((c + 1) * seg_dur / n_cuts))
                 c_dur = max(200_000, c_end - c_start)
-                img_path = cuts_dir / f"cut_{cut_no:02d}.png"
-                if _generate_cut_image(img_path, cut_no):
+                cut_id = f"s{int(s.get('index', i)):03d}-c{c:02d}"
+                selected = cut_assets.get(cut_id) or {}
+                selected_path = Path(str(selected.get("path") or ""))
+                media_kind = str(selected.get("media_kind") or "image")
+                if selected_path.is_file():
+                    suffix = selected_path.suffix.lower() or (
+                        ".mp4" if media_kind == "video" else ".png"
+                    )
+                    img_path = cuts_dir / f"cut_{cut_no:02d}{suffix}"
+                    shutil.copy2(selected_path, img_path)
                     images_ok += 1
+                else:
+                    img_path = cuts_dir / f"cut_{cut_no:02d}.png"
+                    media_kind = "image"
+                    if _generate_cut_image(img_path, cut_no):
+                        images_ok += 1
                 vseg, cloned_v = _build_photo_segment(
                     image_tpl, img_path, c_start, c_dur, lp["img_scale"],
-                    lp["img_y"], render_index=100 + cut_no)
+                    lp["img_y"], render_index=100 + cut_no,
+                    media_kind=media_kind)
                 # 추천 효과를 실제 캡컷 애니메이션으로 부착(가능 시)
                 effect = _pick(effect_recos, c)
                 anim = _match_anim(anim_catalog, effect) if anim_catalog else None

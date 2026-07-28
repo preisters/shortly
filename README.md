@@ -56,6 +56,25 @@ python -m shortly.apps.personal.launcher
 Gemini, OpenAI, Anthropic 및 OpenAI-compatible 로컬 서버 연결을 유지합니다.
 팀 포터블 빌드는 개인판 앱과 로컬 LLM 어댑터를 산출물에서 제외합니다.
 
+### 개인 자동 생성판
+
+개인판에서 이미지·영상 생성까지 사용하려면 선택 의존성을 추가로 설치합니다.
+
+```bash
+python -m pip install -r requirements.txt -r requirements-personal.txt
+python -m shortly.apps.personal.launcher
+```
+
+브라우저의 기존 설정 화면에서 OpenAI 및 Google API 키를 저장한 뒤
+`http://localhost:8756/personal/assets`에서 기존 guide JSON을 컷 명세로 변환하고
+컷별 에셋 유형을 검토할 수 있습니다. 유료 생성은 비용 확인, 명시적 승인, 실행의
+세 단계로 분리되며 승인 토큰은 한 번만 사용할 수 있습니다. 생성물과 사용량 DB는
+개인판 데이터·결과물 폴더에 저장됩니다.
+
+실제 API 가격은 바뀔 수 있으므로 생성 전 공급자 대시보드의 현재 가격을 확인하세요.
+영상 공급자인 Gemini Omni Flash는 현재 preview이므로 중요한 작업은 결과와 과금을
+별도로 확인해야 합니다.
+
 ### 로컬 모델 사용 (Ollama / LM Studio)
 
 `provider=local` 로 OpenAI 호환 로컬 서버에 붙습니다. `pip install openai` 가 필요합니다.

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Shortly 개인 에셋 검토</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,sans-serif;background:#101116;color:#eee}
+    body{max-width:1100px;margin:0 auto;padding:28px}
+    section{background:#191b23;border:1px solid #303341;border-radius:12px;padding:18px;margin:16px 0}
+    textarea,input,select,button{font:inherit;color:inherit;background:#222532;border:1px solid #464b60;border-radius:7px;padding:9px}
+    textarea{width:100%;min-height:170px;box-sizing:border-box}
+    button{cursor:pointer;background:#4659d8} button.secondary{background:#303445}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.muted{color:#a7abba}.error{color:#ff8e8e}
+    pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0d0e12;padding:14px;border-radius:8px}
+    table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #303341;text-align:left}
+  </style>
+</head>
+<body>
+  <h1>개인 자동 생성 · 검토 콘솔</h1>
+  <p class="muted">유료 생성은 작업 생성 → 비용 확인 → 승인 → 실행 순서로만 진행됩니다.</p>
+  <section>
+    <h2>1. CutManifest 생성</h2>
+    <textarea id="guide" placeholder="기존 guide JSON을 붙여 넣으세요"></textarea>
+    <div class="row"><button id="manifest-create">컷 명세 생성</button><span id="manifest-id"></span></div>
+  </section>
+  <section>
+    <h2>2. 컷 유형과 생성</h2>
+    <div id="cuts" class="muted">컷 명세를 먼저 생성하세요.</div>
+  </section>
+  <section>
+    <h2>3. 검수와 사용량</h2>
+    <div class="row">
+      <button id="review" class="secondary">기술 검수</button>
+      <button id="qwen" class="secondary">로컬 Qwen 검수</button>
+      <button id="usage" class="secondary">비용 확인</button>
+    </div>
+    <pre id="result">대기 중</pre>
+  </section>
+  <section>
+    <h2>4. CapCut 내보내기</h2>
+    <p class="muted">준비 단계는 파일과 템플릿만 검사합니다. 커밋을 별도로 눌러야 CapCut 프로젝트가 생성됩니다.</p>
+    <div class="row">
+      <input id="capcut-root" placeholder="CapCut 프로젝트 경로(자동 탐색 시 비움)" style="flex:1">
+      <button id="prepare-export" class="secondary">내보내기 준비</button>
+      <button id="commit-export">CapCut에 커밋</button>
+    </div>
+  </section>
+  <script>
+    let manifest=null, preparedExport=null, automationStatus=null;
+    const result=document.querySelector("#result");
+    async function api(path,options={}){
+      const response=await fetch(path,{headers:{"Content-Type":"application/json"},...options});
+      const body=await response.json();
+      if(!response.ok) throw new Error(body.detail||response.statusText);
+      return body;
+    }
+    function show(value){result.textContent=JSON.stringify(value,null,2)}
+    function render(){
+      document.querySelector("#manifest-id").textContent=manifest?.manifest_id||"";
+      const target=document.querySelector("#cuts");
+      if(!manifest){target.textContent="컷 명세를 먼저 생성하세요.";return}
+      target.innerHTML="<table><thead><tr><th>컷</th><th>프롬프트</th><th>유형</th><th>상태</th><th>실행</th></tr></thead><tbody>"+
+        manifest.cuts.map(c=>`<tr><td>${c.id}</td><td>${c.prompt||""}</td><td><select data-cut="${c.id}">
+        ${["real_image","stock_image","generated_image","generated_video","meme","screenshot","manual_required"].map(v=>`<option ${v===c.asset_type?"selected":""}>${v}</option>`).join("")}
+        </select></td><td>${c.selected_candidate_id?"선택됨":"대기"}</td><td>${c.asset_type.startsWith("generated_")?`<button data-generate="${c.id}">비용 확인·생성</button>`:"수동/검색"}</td></tr>`).join("")+"</tbody></table>";
+      target.querySelectorAll("select").forEach(el=>el.onchange=async()=>{
+        try{await api(`/api/personal/manifests/${manifest.manifest_id}/cuts/${el.dataset.cut}`,{method:"PATCH",body:JSON.stringify({asset_type:el.value})});manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);render()}catch(e){result.textContent=e.message}
+      });
+      target.querySelectorAll("[data-generate]").forEach(el=>el.onclick=async()=>{
+        try{
+          automationStatus ||= await api("/api/personal/automation/status");
+          const cut=manifest.cuts.find(c=>c.id===el.dataset.generate);
+          const kind=cut.asset_type==="generated_video"?"video":"image";
+          const provider=kind==="video"?automationStatus.video_provider:automationStatus.image_provider;
+          const model=kind==="video"?automationStatus.video_model:automationStatus.image_model;
+          const estimate=automationStatus.default_estimates_usd[kind];
+          if(!confirm(`${cut.id}\\n${provider} / ${model}\\n예상 비용 USD $${estimate.toFixed(2)}\\n실제 유료 생성을 승인할까요?`)) return;
+          const job=await api(`/api/personal/manifests/${manifest.manifest_id}/cuts/${cut.id}/jobs`,{method:"POST",body:JSON.stringify({provider,model,estimated_cost_usd:estimate})});
+          const approval=await api(`/api/personal/jobs/${job.id}/approve`,{method:"POST"});
+          show(await api(`/api/personal/jobs/${job.id}/execute`,{method:"POST",body:JSON.stringify({approval_token:approval.approval_token})}));
+          manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);render();
+        }catch(e){result.textContent=e.message}
+      });
+    }
+    document.querySelector("#manifest-create").onclick=async()=>{try{
+      manifest=await api("/api/personal/manifests",{method:"POST",body:JSON.stringify({guide:JSON.parse(document.querySelector("#guide").value),overrides:{}})});render();show(manifest)
+    }catch(e){result.textContent=e.message}};
+    document.querySelector("#review").onclick=async()=>{try{show(await api(`/api/personal/manifests/${manifest.manifest_id}/review`,{method:"POST"}))}catch(e){result.textContent=e.message}};
+    document.querySelector("#qwen").onclick=async()=>{try{show(await api(`/api/personal/manifests/${manifest.manifest_id}/review?local_qwen=true`,{method:"POST"}))}catch(e){result.textContent=e.message}};
+    document.querySelector("#usage").onclick=async()=>{try{show(await api(`/api/personal/usage?manifest_id=${manifest.manifest_id}`))}catch(e){result.textContent=e.message}};
+    document.querySelector("#prepare-export").onclick=async()=>{try{
+      preparedExport=await api("/api/personal/exports/prepare",{method:"POST",body:JSON.stringify({manifest_id:manifest.manifest_id,guide:JSON.parse(document.querySelector("#guide").value),capcut_root:document.querySelector("#capcut-root").value||null})});show(preparedExport)
+    }catch(e){result.textContent=e.message}};
+    document.querySelector("#commit-export").onclick=async()=>{try{
+      if(!preparedExport) throw new Error("먼저 내보내기 준비를 실행하세요.");
+      if(!confirm("검증된 에셋으로 새 CapCut 프로젝트를 생성할까요?")) return;
+      show(await api("/api/personal/exports/commit",{method:"POST",body:JSON.stringify({plan_path:preparedExport.plan_path})}))
+    }catch(e){result.textContent=e.message}};
+  </script>
+</body>
+</html>

@@ -5,6 +5,13 @@
 [`feature-matrix.md`](feature-matrix.md),
 [`team-personal-split-plan.md`](team-personal-split-plan.md)
 
+> 구현 상태(2026-07-27): 기준선 테스트, 제품 profile/path policy, composition
+> root, local provider 경계, 개인 `CutManifest`, 유료 생성 gate, SQLite 원장,
+> 이미지·영상 adapter, 후처리, 읽기 전용 Qwen 검수, 결정론적 workflow,
+> CapCut prepare/commit 기준선까지 구현했다. 상세 결과와 남은 수동 검증은
+> [`personal-automation-implementation-report.md`](personal-automation-implementation-report.md)를
+> 기준으로 한다. 포터블 완성도 개선은 사용자 결정에 따라 후순위다.
+
 ## 1. 구현 원칙
 
 - `main`의 현 동작을 먼저 테스트로 고정한다.

@@ -1,0 +1,146 @@
+"""Read-only technical and local-Qwen review reports."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+from ....core.domain.assets import CutManifest
+from ....llm.base import LLMClient, LLMError
+
+
+@dataclass(frozen=True)
+class ReviewFinding:
+    severity: str
+    code: str
+    message: str
+    cut_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ReviewReport:
+    passed: bool
+    findings: list[ReviewFinding] = field(default_factory=list)
+    summary: str = ""
+    reviewer: str = "deterministic"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "findings": [asdict(item) for item in self.findings],
+            "summary": self.summary,
+            "reviewer": self.reviewer,
+        }
+
+
+def technical_review(manifest: CutManifest) -> ReviewReport:
+    findings: list[ReviewFinding] = []
+    for cut in manifest.cuts:
+        candidate = cut.selected_candidate
+        if candidate is None:
+            findings.append(
+                ReviewFinding(
+                    "warning",
+                    "asset_missing",
+                    "선택된 에셋이 없어 플레이스홀더 또는 수동 삽입이 필요합니다.",
+                    cut.id,
+                )
+            )
+            continue
+        path = Path(candidate.prepared_path or candidate.original_path or "")
+        if not path.is_file():
+            findings.append(
+                ReviewFinding(
+                    "error",
+                    "file_missing",
+                    "선택된 에셋 파일을 찾을 수 없습니다.",
+                    cut.id,
+                )
+            )
+        if candidate.cost_usd < 0:
+            findings.append(
+                ReviewFinding(
+                    "error",
+                    "invalid_cost",
+                    "에셋 비용 기록이 올바르지 않습니다.",
+                    cut.id,
+                )
+            )
+    return ReviewReport(
+        passed=not any(item.severity == "error" for item in findings),
+        findings=findings,
+        summary=f"{len(manifest.cuts)}개 컷, {len(findings)}개 확인 항목",
+    )
+
+
+def qwen_read_only_review(
+    llm: LLMClient,
+    manifest: CutManifest,
+    *,
+    technical: ReviewReport | None = None,
+) -> ReviewReport:
+    """Ask a local model for feedback; no mutation object is provided."""
+
+    if not getattr(llm, "available", False):
+        return ReviewReport(
+            passed=False,
+            findings=[
+                ReviewFinding(
+                    "warning",
+                    "local_model_unavailable",
+                    "로컬 검수 모델을 사용할 수 없습니다.",
+                )
+            ],
+            summary="로컬 검수를 실행하지 못했습니다.",
+            reviewer="local-qwen",
+        )
+    snapshot = manifest.to_dict()
+    for cut in snapshot["cuts"]:
+        for candidate in cut.get("candidates", []):
+            candidate.pop("original_path", None)
+            candidate.pop("prepared_path", None)
+    system = (
+        "You review a YouTube Shorts cut plan. Return feedback only. "
+        "Never propose or claim that you changed files, the manifest, or a project."
+    )
+    user = (
+        "다음 컷 구성을 검수하세요. JSON만 반환하세요. "
+        '형식: {"passed": bool, "summary": str, "findings": '
+        '[{"severity":"info|warning|error","code":str,'
+        '"message":str,"cut_id":str|null}]}\n'
+        f"manifest={json.dumps(snapshot, ensure_ascii=False)}\n"
+        f"technical={json.dumps((technical or technical_review(manifest)).to_dict(), ensure_ascii=False)}"
+    )
+    try:
+        value = llm.complete_json(system, user, temperature=0.1, max_tokens=2000)
+        findings = [
+            ReviewFinding(
+                severity=str(item.get("severity") or "warning"),
+                code=str(item.get("code") or "model_feedback"),
+                message=str(item.get("message") or ""),
+                cut_id=item.get("cut_id"),
+            )
+            for item in (value.get("findings") or [])
+            if isinstance(item, dict)
+        ]
+        return ReviewReport(
+            passed=bool(value.get("passed", False)),
+            findings=findings,
+            summary=str(value.get("summary") or ""),
+            reviewer=f"local-qwen:{llm.text_model}",
+        )
+    except (LLMError, ValueError, TypeError) as exc:
+        return ReviewReport(
+            passed=False,
+            findings=[
+                ReviewFinding(
+                    "warning",
+                    "review_parse_failed",
+                    f"로컬 검수 응답을 해석하지 못했습니다: {type(exc).__name__}",
+                )
+            ],
+            summary="로컬 검수 결과 해석 실패",
+            reviewer=f"local-qwen:{llm.text_model}",
+        )

@@ -180,19 +180,37 @@
       const cut=manifest?.cuts.find(item=>item.id===cutId);
       if(cell&&cut) cell.innerHTML=statusLabel(cut);
     }
+    function stopJobRefresh(){
+      if(jobRefreshTimer){
+        clearTimeout(jobRefreshTimer);
+        jobRefreshTimer=null;
+      }
+    }
     async function refreshJobStatuses(){
-      if(!manifest) return;
+      if(!manifest) return false;
       try{
         const jobs=await api(`/api/personal/jobs?manifest_id=${encodeURIComponent(manifest.manifest_id)}`);
         const latest=new Map();
         jobs.forEach(job=>{if(!latest.has(job.cut_id)) latest.set(job.cut_id,job)});
         latest.forEach(job=>setCutState(job.cut_id,job.status,job.id,job.error||""));
-      }catch(_error){}
+        return jobs.some(job=>
+          ["approved","awaiting_approval","running","submitted"].includes(job.status)
+        );
+      }catch(_error){
+        return false;
+      }
+    }
+    async function pollJobStatuses(){
+      const hasActiveJobs=await refreshJobStatuses();
+      if(hasActiveJobs){
+        jobRefreshTimer=setTimeout(pollJobStatuses,2000);
+      }else{
+        stopJobRefresh();
+      }
     }
     function startJobRefresh(){
-      if(jobRefreshTimer) clearInterval(jobRefreshTimer);
-      refreshJobStatuses();
-      jobRefreshTimer=setInterval(refreshJobStatuses,2000);
+      stopJobRefresh();
+      pollJobStatuses();
     }
     function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
     function pendingGeneratedCuts(){

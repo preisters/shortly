@@ -104,7 +104,12 @@ class CutManifestTests(unittest.TestCase):
         self.assertIn("summary.failures.push", page)
         self.assertIn("로컬 Qwen 검수 중", page)
         self.assertIn("data-cut-status", page)
-        self.assertIn("setInterval(refreshJobStatuses,2000)", page)
+        self.assertIn("jobs.some(job=>", page)
+        self.assertIn(
+            "jobRefreshTimer=setTimeout(pollJobStatuses,2000)",
+            page,
+        )
+        self.assertNotIn("setInterval(refreshJobStatuses,2000)", page)
         self.assertIn('setCutState(cut.id,"running")', page)
         self.assertIn('data-stock-search="', page)
         self.assertIn("/stock-search?", page)

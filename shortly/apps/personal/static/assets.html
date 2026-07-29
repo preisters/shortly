@@ -431,7 +431,7 @@
       stockPage=1;
       stockPageCount=1;
       document.querySelector("#stock-cut").textContent=`${cut.id} · ${cut.prompt}`;
-      document.querySelector("#stock-query").value=cut.prompt||"";
+      document.querySelector("#stock-query").value=cut.stock_query||cut.prompt||"";
       document.querySelector("#stock-modal").hidden=false;
       try{
         await configureStockProviders();

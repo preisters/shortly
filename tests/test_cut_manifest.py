@@ -77,6 +77,7 @@ class _AssetDirectorLlm(LLMClient):
                         "실제 기록사진이 아닌 협상 상황 재현 장면",
                         "실제 포장 외형과 문구가 정확해야 함",
                     ],
+                    "stock_query_suggestions": ["", ""],
                 }
             ]
         }
@@ -114,6 +115,7 @@ class CutManifestTests(unittest.TestCase):
         self.assertIn('data-stock-search="', page)
         self.assertIn("/stock-search?", page)
         self.assertIn("/stock-select", page)
+        self.assertIn("cut.stock_query||cut.prompt", page)
         self.assertIn("CC BY 결과도 포함", page)
         self.assertIn("현재 선택은 해제됩니다", page)
         self.assertIn("el.value=cut.asset_type", page)
@@ -170,6 +172,28 @@ class CutManifestTests(unittest.TestCase):
             prompt="도쿄 시장 전경 자료 사진",
             media_hint="사진",
             narration="시장 규모를 소개한다",
+        )
+        self.assertEqual(asset_type, AssetType.STOCK_IMAGE)
+        self.assertEqual(media, MediaKind.IMAGE)
+        self.assertFalse(fact_sensitive)
+        self.assertIn("스톡", notes[0])
+
+    def test_korean_local_scene_does_not_default_to_stock_image(self) -> None:
+        asset_type, media, fact_sensitive, notes = classify_asset_type(
+            prompt="한국 편의점 내부 자료 사진",
+            media_hint="사진",
+            narration="한국 편의점의 독특한 분위기를 보여준다",
+        )
+        self.assertEqual(asset_type, AssetType.GENERATED_IMAGE)
+        self.assertEqual(media, MediaKind.IMAGE)
+        self.assertFalse(fact_sensitive)
+        self.assertIn("AI 이미지", notes[0])
+
+    def test_common_korean_landmark_can_still_use_stock_image(self) -> None:
+        asset_type, media, fact_sensitive, notes = classify_asset_type(
+            prompt="서울 야경 자료 사진",
+            media_hint="사진",
+            narration="서울을 소개한다",
         )
         self.assertEqual(asset_type, AssetType.STOCK_IMAGE)
         self.assertEqual(media, MediaKind.IMAGE)
@@ -235,6 +259,45 @@ class CutManifestTests(unittest.TestCase):
         )
         self.assertTrue(manifest.cuts[1].fact_sensitive)
         self.assertIn("생성 모델 판단", manifest.cuts[0].notes[0])
+
+    def test_generation_llm_stock_query_is_carried_to_manifest(self) -> None:
+        llm = _AssetDirectorLlm()
+        original = llm.complete_json
+
+        def with_stock_query(*args, **kwargs):
+            payload = original(*args, **kwargs)
+            segment = payload["segments"][0]
+            segment["asset_type_suggestions"][0] = "stock_image"
+            segment["image_suggestions"][0] = "도쿄 시장 전경"
+            segment["stock_query_suggestions"][0] = "Tokyo market street"
+            return payload
+
+        llm.complete_json = with_stock_query
+        classified = recommend_cuts(
+            llm,
+            {"image_style": {}, "editing_style": {}},
+            {
+                "title": "fixture",
+                "segments": [
+                    {
+                        "index": 0,
+                        "duration_sec": 2,
+                        "narration": "도쿄 시장을 소개한다",
+                        "cuts_suggested": 2,
+                    }
+                ],
+            },
+        )
+        manifest = build_cut_manifest(classified)
+
+        self.assertEqual(
+            classified["segments"][0]["stock_query_suggestions"][0],
+            "Tokyo market street",
+        )
+        self.assertEqual(
+            manifest.cuts[0].stock_query,
+            "Tokyo market street",
+        )
 
     def test_exact_product_source_overrides_unsafe_model_generation(self) -> None:
         guide = {

@@ -47,10 +47,19 @@ _UUID_RE = re.compile(
 )
 _NUMERIC_ID_RE = re.compile(r"^[1-9][0-9]*$")
 _TAG_RE = re.compile(r"<[^>]+>")
+_HANGUL_RE = re.compile(r"[\uac00-\ud7a3]")
 
 
 def _plain_text(value: Any) -> str:
     return re.sub(r"\s+", " ", html.unescape(_TAG_RE.sub("", str(value or "")))).strip()
+
+
+def _query_language(query: str) -> tuple[str, str]:
+    """Return Pixabay language and Pexels locale for the actual query text."""
+
+    if _HANGUL_RE.search(query):
+        return "ko", "ko-KR"
+    return "en", "en-US"
 
 
 def _read_limited(response, limit: int) -> bytes:
@@ -490,7 +499,7 @@ class PixabayStockService(_CachedKeyedProvider):
         request_params = {
             "key": self.api_key,
             "q": normalized,
-            "lang": "ko",
+            "lang": _query_language(normalized)[0],
             "image_type": "photo",
             "orientation": "vertical",
             "safesearch": "true",
@@ -610,7 +619,7 @@ class PexelsStockService(_CachedKeyedProvider):
         params = {
             "query": normalized,
             "orientation": "portrait",
-            "locale": "ko-KR",
+            "locale": _query_language(normalized)[1],
             "page": page,
             "per_page": page_size,
         }

@@ -137,6 +137,7 @@ class StockSearchTests(unittest.TestCase):
         )
         called_url = request.call_args.args[0]
         self.assertIn("pixabay-secret", called_url)
+        self.assertIn("lang=ko", called_url)
         self.assertNotIn("pixabay-secret", cache_text)
 
     def test_pexels_search_uses_authorization_header_and_site_label(self) -> None:
@@ -171,6 +172,10 @@ class StockSearchTests(unittest.TestCase):
         )
         self.assertEqual(result["results"][0]["provider"], "pexels")
         self.assertEqual(result["results"][0]["provider_label"], "Pexels")
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(request.call_args.args[0]).query
+        )
+        self.assertEqual(query["locale"], ["en-US"])
 
     def test_aggregate_search_skips_unconfigured_providers(self) -> None:
         service = StockSearchService(Path("assets"))

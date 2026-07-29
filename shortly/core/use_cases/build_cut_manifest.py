@@ -14,7 +14,7 @@ from ..domain.assets import (
     MediaKind,
 )
 
-ASSET_CLASSIFIER_VERSION = 3
+ASSET_CLASSIFIER_VERSION = 4
 
 _FACT_TERMS = (
     "실제",
@@ -105,6 +105,46 @@ _EXACT_SOURCE_TERMS = (
     "포장지",
     "공식",
 )
+_KOREAN_LOCAL_CONTEXT_TERMS = (
+    "한국인",
+    "한국 회사",
+    "한국 기업",
+    "한국 사무실",
+    "한국 가정",
+    "한국 아파트",
+    "한국 학교",
+    "한국 교실",
+    "한국 편의점",
+    "한국 마트",
+    "한국 슈퍼",
+    "한국 시장",
+    "전통시장",
+    "한국 식당",
+    "한국 카페",
+    "한복",
+    "한옥",
+    "김치",
+    "떡",
+    "Korean office",
+    "Korean home",
+    "Korean school",
+    "Korean convenience store",
+    "Korean supermarket",
+)
+_COMMON_KOREAN_STOCK_TERMS = (
+    "서울 전경",
+    "서울 야경",
+    "부산 전경",
+    "제주 풍경",
+    "한강",
+    "경복궁",
+    "광화문",
+    "남산타워",
+    "태극기",
+    "Seoul skyline",
+    "Han River",
+    "Gyeongbokgung",
+)
 
 
 def _pick(items: Any, index: int) -> str:
@@ -123,6 +163,13 @@ def _pick_exact(items: Any, index: int) -> Any:
 def _contains(text: str, terms: tuple[str, ...]) -> bool:
     lowered = text.casefold()
     return any(term.casefold() in lowered for term in terms)
+
+
+def _stock_search_is_unreliable(text: str) -> bool:
+    return _contains(text, _KOREAN_LOCAL_CONTEXT_TERMS) and not _contains(
+        text,
+        _COMMON_KOREAN_STOCK_TERMS,
+    )
 
 
 def classify_asset_type(
@@ -182,7 +229,9 @@ def classify_asset_type(
     if _contains(combined, _REAL_TERMS):
         notes.append("원본 또는 직접 촬영한 실제 이미지를 사용하는 컷입니다.")
         return AssetType.REAL_IMAGE, MediaKind.IMAGE, False, notes
-    if _contains(combined, _STOCK_TERMS):
+    if _contains(combined, _STOCK_TERMS) and not _stock_search_is_unreliable(
+        visual_context
+    ):
         notes.append(
             "일반 자료화면으로 충분히 확보 가능한 컷이라 스톡 이미지 검색을 추천합니다."
         )
@@ -229,6 +278,13 @@ def build_cut_manifest(
                 segment.get("asset_reason_suggestions"),
                 cut_index,
             )
+            stock_query = str(
+                _pick_exact(
+                    segment.get("stock_query_suggestions"),
+                    cut_index,
+                )
+                or ""
+            ).strip()
             try:
                 recommended_type = AssetType(model_asset_type)
             except (TypeError, ValueError):
@@ -256,6 +312,19 @@ def build_cut_manifest(
                         else "컷 문맥과 에셋 확보 가능성을 기준으로 분류했습니다."
                     )
                 ]
+                if (
+                    asset_type is AssetType.STOCK_IMAGE
+                    and _stock_search_is_unreliable(prompt)
+                ):
+                    asset_type = AssetType.GENERATED_IMAGE
+                    media_kind = MediaKind.IMAGE
+                    stock_query = ""
+                    notes.extend(
+                        [
+                            "한국 고유 디테일이 핵심인 장면은 일반 스톡 검색의 정확도가 낮아 "
+                            "AI 이미지 생성으로 보정했습니다."
+                        ]
+                    )
                 exact_source_required = (
                     _contains(prompt, _EXACT_SOURCE_TERMS)
                     and not _contains(
@@ -320,6 +389,11 @@ def build_cut_manifest(
                     prompt=prompt or str(segment.get("intent") or ""),
                     asset_type=asset_type,
                     media_kind=media_kind,
+                    stock_query=(
+                        stock_query
+                        if asset_type is AssetType.STOCK_IMAGE
+                        else ""
+                    ),
                     fact_sensitive=fact_sensitive,
                     approval_status=(
                         ApprovalStatus.PENDING

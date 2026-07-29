@@ -137,6 +137,14 @@ def render_guide_markdown(guide: Dict) -> str:
             lines.append(
                 f"- 에셋 판단: {' / '.join(s['asset_reason_suggestions'])}"
             )
+        if s.get("stock_query_suggestions"):
+            queries = [
+                item
+                for item in s["stock_query_suggestions"]
+                if str(item).strip()
+            ]
+            if queries:
+                lines.append(f"- 스톡 검색어: {', '.join(queries)}")
         if s.get("effect_suggestions"):
             lines.append(f"- 효과 추천: {', '.join(s['effect_suggestions'])}")
     g = guide.get("global_notes", {})

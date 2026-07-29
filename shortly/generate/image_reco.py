@@ -99,7 +99,8 @@ def _recommend_llm(llm: LLMClient, image_style: Dict, editing_style: Dict,
         '("real_image"|"stock_image"|"generated_image"|"generated_video"|'
         '"meme"|"screenshot"|"manual_required")[], '
         '"fact_sensitive_suggestions": boolean[], '
-        '"asset_reason_suggestions": string[]}]} '
+        '"asset_reason_suggestions": string[], '
+        '"stock_query_suggestions": string[]}]} '
         "(각 배열 길이는 그 세그먼트의 컷 수와 정확히 같게)"
     )
     user = (
@@ -116,7 +117,13 @@ def _recommend_llm(llm: LLMClient, image_style: Dict, editing_style: Dict,
         f"- generated_image/video: 실제 기록 화면이 존재하지 않는 재현·연상·상황극·상징·합성·과장 연출. "
         f"사실을 설명하는 대본이어도 화면이 재현 장면이면 생성형을 선택한다.\n"
         f"- real_image: 실제 제품, 포장, 로고, 특정 실존 인물처럼 외형이 정확해야 하는 원본 사진.\n"
-        f"- stock_image: 일반 도시·거리·풍경·손·사무실처럼 특정 대상이 아니며 스톡으로 쉽게 구할 수 있는 장면.\n"
+        f"- stock_image: 세계 스톡 사이트에서 흔히 검색되는 일반 도시·거리·풍경·손·사무실처럼 "
+        f"특정 지역·문화·브랜드의 정확한 재현이 필요 없는 장면에만 사용한다.\n"
+        f"- 한국 고유 제품·가게·가정·학교·회사·인물 분위기처럼 한국적 디테일이 결과의 핵심인데 "
+        f"세계 스톡 사이트에서 정확히 찾기 어려운 장면은 stock_image로 분류하지 않는다. "
+        f"실제 원본이 필요 없으면 generated_image/video, 실제 외형이 중요하면 real_image 또는 "
+        f"manual_required를 선택한다. 단, 서울 전경·경복궁·한강처럼 널리 촬영된 명소와 일반 풍경은 "
+        f"검색 가능성이 높으면 stock_image를 사용할 수 있다.\n"
         f"- screenshot/meme: 원본 화면 캡처 또는 사람이 맥락에 맞게 고를 밈.\n"
         f"- manual_required: 원본 영상 등 위 유형으로 처리할 수 없고 사람이 직접 확보해야 하는 경우에만 사용한다.\n"
         f"- fact_sensitive=true: 실제 제품·포장·로고·특정 실존 인물·문서처럼 원본과 동일해야 할 때만 사용한다. "
@@ -125,6 +132,9 @@ def _recommend_llm(llm: LLMClient, image_style: Dict, editing_style: Dict,
         f"generated_image / fact_sensitive=false다.\n"
         f"- 예: '실제 대표 인물 사진'은 real_image / fact_sensitive=true다.\n"
         f"- asset_reason_suggestions에는 선택 근거를 한 문장으로 쓴다.\n"
+        f"- stock_query_suggestions는 stock_image 컷마다 Openverse·Pixabay·Pexels에서 검색할 "
+        f"간결한 영어 명사구(2~6개 핵심 단어)로 쓴다. Korea/Seoul 같은 지역 맥락과 고유명사는 "
+        f"필요할 때 유지하고, 문장·연출 지시·자막 문구는 제외한다. stock_image가 아닌 컷은 빈 문자열로 쓴다.\n"
         f"스키마: {schema}"
     )
     data = llm.complete_json(system, user, max_tokens=4000)
@@ -163,6 +173,7 @@ def recommend_cuts(llm: LLMClient, profile: Dict, guide: Dict) -> Dict:
         asset_types = rec.get("asset_type_suggestions")
         fact_flags = rec.get("fact_sensitive_suggestions")
         reasons = rec.get("asset_reason_suggestions")
+        stock_queries = rec.get("stock_query_suggestions")
         if (
             isinstance(asset_types, list)
             and len(asset_types) == n
@@ -180,5 +191,13 @@ def recommend_cuts(llm: LLMClient, profile: Dict, guide: Dict) -> Dict:
                 n,
                 "생성 모델이 컷의 문맥과 확보 가능성을 기준으로 분류했습니다.",
             )
+            if (
+                isinstance(stock_queries, list)
+                and len(stock_queries) == n
+                and all(isinstance(item, str) for item in stock_queries)
+            ):
+                seg["stock_query_suggestions"] = [
+                    str(item).strip() for item in stock_queries
+                ]
             seg["asset_classification_source"] = "generation_llm"
     return guide

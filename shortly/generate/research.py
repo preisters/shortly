@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import re
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from urllib.request import Request, urlopen
 
-from ..llm.base import LLMClient, LLMError
+from ..llm.base import LLMClient, LLMError, LLMResponseParseError
 from ..utils import log
 
 try:
@@ -31,6 +31,47 @@ _STOP = {
     "한국", "대한", "있는", "없는", "하는", "된", "하는", "이거", "그거",
     "뭔가", "어떤", "요즘", "진짜", "사실",
 }
+
+_LOW_QUALITY_HOSTS = (
+    "youtube.com",
+    "youtu.be",
+    "namu.wiki",
+    "pinterest.",
+    "tistory.com",
+    "blog.naver.com",
+    "m.blog.naver.com",
+    "bobaedream.co.kr",
+    "etoland.co.kr",
+    "instiz.net",
+    "dcinside.com",
+    "fmkorea.com",
+    "theqoo.net",
+)
+_EDITORIAL_HOSTS = (
+    "yna.co.kr",
+    "newsis.com",
+    "chosun.com",
+    "joongang.co.kr",
+    "donga.com",
+    "hani.co.kr",
+    "khan.co.kr",
+    "hankookilbo.com",
+    "kmib.co.kr",
+    "seoul.co.kr",
+    "mk.co.kr",
+    "hankyung.com",
+    "sedaily.com",
+    "edaily.co.kr",
+    "asiae.co.kr",
+    "etnews.com",
+    "zdnet.co.kr",
+    "koreadaily.com",
+)
+_SPAM_MARKERS = re.compile(
+    r"(카지노|토토|바카라|성인\s*(?:방송|만남|용품)|porn|xxx|escort|"
+    r"자유게시판|유머\s*게시판|사랑방)",
+    re.I,
+)
 
 
 def _clean_query_seed(text: str) -> str:
@@ -57,26 +98,29 @@ def build_queries(topic: str, max_queries: int = 4) -> List[str]:
     tokens = [t for t in re.findall(r"[A-Za-z][A-Za-z0-9\-]{1,}|[가-힣]{2,}", first)
               if t not in _STOP]
     brand = tokens[0] if tokens else ""
+    if len(brand) >= 3:
+        brand = re.sub(r"(?:은|는|이|가|을|를|의|과|와)$", "", brand)
     core = " ".join(tokens[:4]).strip()
 
     extras: List[str] = []
     if brand:
+        entity = f'"{brand}"'
+        if any(k in seed for k in ("해외", "미국", "성공", "실적", "잘 팔", "수출")):
+            extras.extend([
+                f"{entity} 해외 수출 실적",
+                f"{entity} 미국 수출 판매",
+            ])
         if any(k in seed for k in ("독도", "일본", "수출")):
             extras.extend([
-                f"{brand} 독도 일본 수출",
-                f"{brand} 일본 수출 포기",
                 # 시점 혼동 방지: 발생 연도/재조명 구분용 (우선)
-                f"{brand} 일본 수출 포기 언제",
-                f"{brand} 독도 수출 연도",
-                f"{brand} 독도 포장",
+                f"{entity} 일본 수출 포기 언제",
+                f"{entity} 독도 일본 수출",
             ])
-        extras.extend([f"{brand} 유행", f"{brand} 가격"])
+        extras.extend([f"{entity} 유행", f"{entity} 가격"])
     if core and core != first:
         extras.append(core)
     if "성경김" in first or brand == "성경김":
-        extras.insert(0, "성경식품 독도 일본 수출")
-        extras.insert(1, "성경식품 독도 포장지")
-        extras.insert(2, "성경식품 일본 수출 포기 언제 연도")
+        extras.insert(0, '"성경식품" 독도 일본 수출')
 
     seen = {first}
     for q in extras:
@@ -97,6 +141,7 @@ _MEASURED_STAT = re.compile(
     r"(?:\d[\d,.]*\s*(?:%|퍼센트|원|달러|명|개|건|배|억|만|조))|"
     r"(?:(?:수출액|매출|점유율|증가율|감소율).{0,24}\d)"
 )
+_PROJECTION = re.compile(r"(전망|예상|추정|목표|계획|예정)")
 
 
 def _sanitize_temporal_facts(hard_facts: List[str], avoid: List[str]
@@ -157,8 +202,131 @@ def _strip_unscoped_numeric_claims(
     return kept, list(dict.fromkeys(extra_avoid))
 
 
+def _numeric_tokens(value: str) -> List[str]:
+    return [
+        token.replace(",", "").lstrip("0") or "0"
+        for token in re.findall(r"\d[\d,.]*", value or "")
+    ]
+
+
+def _quantified_fact_is_supported(
+    fact: Dict[str, str],
+    results: List[Dict],
+) -> bool:
+    """Require the value and period to be visible in the cited snippet."""
+
+    cited = _canonical_source_url(fact.get("source_url", ""))
+    source = next(
+        (
+            row
+            for row in results
+            if _canonical_source_url(str(row.get("url") or "")) == cited
+        ),
+        None,
+    )
+    if not source or str(source.get("source_tier") or "general") == "low":
+        return False
+    blob = (
+        f"{source.get('title', '')} {source.get('snippet', '')}"
+    ).replace(",", "")
+    blob_tokens = set(_numeric_tokens(blob))
+    required = _numeric_tokens(
+        " ".join(
+            [
+                fact.get("value", ""),
+                fact.get("period", ""),
+                fact.get("comparison_value", ""),
+                fact.get("comparison_period", ""),
+                fact.get("change", ""),
+            ]
+        )
+    )
+    return bool(_numeric_tokens(fact.get("value", ""))) and all(
+        token in blob_tokens for token in required
+    )
+
+
 def _canonical_source_url(value: str) -> str:
-    return value.strip().split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    return _normalize_search_url(value).split("#", 1)[0].split("?", 1)[0].rstrip("/")
+
+
+def _normalize_search_url(value: str) -> str:
+    """Return a direct, stable URL when DDG HTML yielded a redirect link."""
+
+    raw = (value or "").strip()
+    if raw.startswith("//"):
+        raw = "https:" + raw
+    try:
+        parsed = urlparse(raw)
+        if parsed.hostname and parsed.hostname.endswith("duckduckgo.com"):
+            target = parse_qs(parsed.query).get("uddg", [""])[0]
+            if target:
+                raw = unquote(target)
+    except ValueError:
+        return raw
+    return raw
+
+
+def _host_for(value: str) -> str:
+    try:
+        return (urlparse(_normalize_search_url(value)).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _host_matches(host: str, suffix: str) -> bool:
+    suffix = suffix.lower()
+    if suffix.endswith("."):
+        return suffix in host
+    return host == suffix or host.endswith("." + suffix)
+
+
+def _source_quality(row: Dict) -> Tuple[str, int]:
+    """Classify search snippets before they can become factual evidence."""
+
+    host = _host_for(str(row.get("url") or ""))
+    blob = f"{row.get('title', '')} {row.get('snippet', '')}"
+    if not host or _SPAM_MARKERS.search(blob):
+        return "low", 0
+    if any(_host_matches(host, value) for value in _LOW_QUALITY_HOSTS):
+        return "low", 0
+    if host.endswith(".go.kr") or host.endswith(".gov") or host.endswith(".gov.kr"):
+        return "authoritative", 4
+    if any(_host_matches(host, value) for value in _EDITORIAL_HOSTS):
+        return "editorial", 3
+    if host.endswith(".ac.kr") or host.endswith(".edu"):
+        return "authoritative", 4
+    return "general", 2
+
+
+def rank_search_results(
+    rows: List[Dict],
+    max_results: int,
+) -> List[Dict]:
+    """Prefer usable evidence and discard low-quality noise when alternatives exist."""
+
+    normalized: List[Tuple[int, int, Dict]] = []
+    seen = set()
+    for position, value in enumerate(rows):
+        if not isinstance(value, dict):
+            continue
+        row = dict(value)
+        row["url"] = _normalize_search_url(str(row.get("url") or ""))
+        key = _canonical_source_url(row["url"]) or str(
+            row.get("title") or ""
+        ).strip().casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        tier, score = _source_quality(row)
+        row["source_tier"] = tier
+        row["source_score"] = score
+        normalized.append((score, position, row))
+
+    usable = [item for item in normalized if item[0] > 0]
+    pool = usable if usable else normalized
+    pool.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in pool[:max(0, max_results)]]
 
 
 def _search_ddgs(query: str, max_results: int) -> List[Dict]:
@@ -212,22 +380,31 @@ def _search_ddg_html(query: str, max_results: int) -> List[Dict]:
 
 def web_search(query: str, max_results: int = 5) -> List[Dict]:
     """단일 쿼리 웹 검색."""
-    rows = _search_ddgs(query, max_results)
+    candidate_limit = max(max_results * 2, min(12, max_results + 6))
+    rows = _search_ddgs(query, candidate_limit)
     if not rows:
-        rows = _search_ddg_html(query, max_results)
-    return rows
+        rows = _search_ddg_html(query, candidate_limit)
+    return rank_search_results(rows, max_results)
 
 
 def collect_raw(topic: str, max_results: int = 8,
                 max_queries: int = 4) -> Dict:
-    """주제 관련 검색 결과를 모아 중복 제거한다."""
+    """주제 관련 검색 결과를 쿼리별로 고르게 모아 중복 제거한다."""
     queries = build_queries(topic, max_queries=max_queries)
     per_q = max(3, max_results // max(1, len(queries) or 1))
     merged: List[Dict] = []
     seen_urls = set()
     seen_titles = set()
-    for q in queries:
-        for row in web_search(q, max_results=per_q):
+    buckets = [
+        web_search(query, max_results=per_q)
+        for query in queries
+    ]
+    max_bucket_size = max((len(bucket) for bucket in buckets), default=0)
+    for result_position in range(max_bucket_size):
+        for bucket in buckets:
+            if result_position >= len(bucket):
+                continue
+            row = bucket[result_position]
             key = (row.get("url") or "").split("?")[0] or row.get("title") or ""
             title = row.get("title") or ""
             if key and key in seen_urls:
@@ -254,7 +431,7 @@ def _format_raw_brief(raw: Dict) -> str:
     lines = []
     for i, r in enumerate(raw.get("results") or [], 1):
         lines.append(
-            f"{i}. {r.get('title', '')}\n"
+            f"{i}. [{r.get('source_tier', 'general')}] {r.get('title', '')}\n"
             f"   {r.get('snippet', '')}\n"
             f"   ({r.get('url', '')})"
         )
@@ -406,6 +583,13 @@ def distill_research(llm: Optional[LLMClient], topic: str, raw: Dict) -> Dict:
 
     system = (
         "너는 쇼츠 대본용 팩트 리서처다. 검색 스니펫에 나온 내용만 추출하되, "
+        "각 결과 앞의 source_tier를 출처 신뢰도 경계로 사용한다. authoritative와 "
+        "editorial을 우선하고 general은 보조 근거로만 쓴다. low 결과는 검색 단서일 "
+        "뿐이므로 단독으로 hard_facts·drama_beats·quantified_facts를 만들지 마라. "
+        "서로 독립적인 둘 이상의 출처가 같은 사건을 뒷받침하면 더 신뢰한다. "
+        "사용자 주제의 주인공 회사·제품만 hard_facts와 drama_beats로 정리한다. "
+        "비슷한 사건의 다른 회사가 같은 기사에 등장하면 주체 혼동 방지용으로만 보고, "
+        "사용자가 비교를 요청하지 않은 이상 그 회사의 사건을 대본 재료로 올리지 마라. "
         "시청 긴장을 만드는 '확인된 갈등'(누가 무엇을 요구/거절/고수했는지)은 "
         "hard_facts 와 drama_beats 에 반드시 넣어라. "
         "스니펫에 '일본 측 요구를 거부', '독도를 지우느니 시장 포기'처럼 나오면 "
@@ -428,16 +612,17 @@ def distill_research(llm: Optional[LLMClient], topic: str, raw: Dict) -> Dict:
         "문장 주어를 엄격히 분리해라. A의 '올해 초 수출 불발'을 B hard_facts 에 넣지 마라."
     )
     schema = (
-        '{"quantified_facts": [{"subject": string(통계 주체·지역·품목 범위), '
+        '{"quantified_facts": 최대 4개 [{"subject": string(통계 주체·지역·품목 범위), '
         '"metric": string, "value": string, "unit": string, '
         '"period": string(절대연도·기간), "comparison_value": string, '
         '"comparison_period": string, "change": string, '
         '"source_label": string, "source_url": string}], '
-        '"hard_facts": string[](스니펫 근거 사건·제품·절대연도 가능하면 포함, 주체 명시), '
-        '"drama_beats": string[](스니펫 근거 갈등/대치/한 방), '
-        '"soft_angles": string[](분위기 과장만), '
-        '"curiosity_hooks": string[](근거 있는 궁금증), '
-        '"avoid_claims": string[](스니펫에 없는 창작·상대시점 단정·주체혼동)}'
+        '"hard_facts": 최대 6개 string[](스니펫 근거 사건·제품·절대연도 가능하면 포함, 주체 명시), '
+        '"drama_beats": 최대 3개 string[](스니펫 근거 갈등/대치/한 방), '
+        '"soft_angles": 최대 2개 string[](분위기 과장만), '
+        '"curiosity_hooks": 최대 2개 string[](근거 있는 궁금증), '
+        '"avoid_claims": 최대 6개 string[](스니펫에 없는 창작·상대시점 단정·주체혼동)}. '
+        "모든 문자열은 160자 이내로 간결하게 쓴다."
     )
     user = (
         f"[사용자 주제/메모]\n{topic[:2000]}\n\n"
@@ -446,6 +631,28 @@ def distill_research(llm: Optional[LLMClient], topic: str, raw: Dict) -> Dict:
     )
     try:
         data = llm.complete_json(system, user, temperature=0.1, max_tokens=3500)
+    except LLMResponseParseError as exc:
+        log.info("리서치 요약 JSON 재시도: %s", exc)
+        retry_system = (
+            system
+            + "\n이전 응답이 너무 길거나 불완전했다. 각 배열의 최대 개수를 지키고 "
+            "중복을 제거해 2,400 토큰 이내의 완전한 JSON 하나로만 압축하라."
+        )
+        try:
+            data = llm.complete_json(
+                retry_system,
+                user,
+                temperature=0.0,
+                max_tokens=2800,
+            )
+        except LLMError as retry_exc:
+            log.info("리서치 요약 LLM 재시도 실패: %s", retry_exc)
+            base["hard_facts"] = _enrich_conflict_facts([], raw)
+            if base["hard_facts"]:
+                base["drama_beats"] = list(base["hard_facts"][:2])
+                base["thin"] = False
+            base["brief_text"] = _build_brief_text(base)
+            return base
     except LLMError as exc:
         log.info("리서치 요약 LLM 실패: %s", exc)
         base["hard_facts"] = _enrich_conflict_facts([], raw)
@@ -464,13 +671,28 @@ def distill_research(llm: Optional[LLMClient], topic: str, raw: Dict) -> Dict:
                 "curiosity_hooks", "avoid_claims"):
         val = data.get(key) or []
         if isinstance(val, list):
-            base[key] = [str(x).strip() for x in val if str(x).strip()]
+            limit = {
+                "hard_facts": 6,
+                "drama_beats": 3,
+                "soft_angles": 2,
+                "curiosity_hooks": 2,
+                "avoid_claims": 6,
+            }[key]
+            base[key] = [
+                str(x).strip()[:240]
+                for x in val
+                if str(x).strip()
+            ][:limit]
 
     quantified = data.get("quantified_facts") or []
     allowed_source_urls = {
         _canonical_source_url(str(row.get("url") or ""))
         for row in base["results"]
-        if isinstance(row, dict) and str(row.get("url") or "").strip()
+        if (
+            isinstance(row, dict)
+            and str(row.get("url") or "").strip()
+            and str(row.get("source_tier") or "general") != "low"
+        )
     }
     if isinstance(quantified, list):
         for value in quantified:
@@ -502,11 +724,35 @@ def distill_research(llm: Optional[LLMClient], topic: str, raw: Dict) -> Dict:
             )
             if all(normalized[key] for key in required) and (
                 _ABSOLUTE_YEAR.search(normalized["period"])
+                and not _RELATIVE_TIME.search(normalized["period"])
+                and not _PROJECTION.search(
+                    " ".join(normalized.values())
+                )
                 and normalized["source_url"].startswith(("http://", "https://"))
                 and _canonical_source_url(normalized["source_url"])
                 in allowed_source_urls
+                and (
+                    not (
+                        normalized["comparison_value"]
+                        or normalized["change"]
+                    )
+                    or (
+                        bool(normalized["comparison_period"])
+                        and bool(
+                            _ABSOLUTE_YEAR.search(
+                                normalized["comparison_period"]
+                            )
+                        )
+                    )
+                )
+                and _quantified_fact_is_supported(
+                    normalized,
+                    base["results"],
+                )
             ):
                 base["quantified_facts"].append(normalized)
+            if len(base["quantified_facts"]) >= 4:
+                break
 
     base["hard_facts"] = _enrich_conflict_facts(base["hard_facts"], raw)
     base["hard_facts"], base["avoid_claims"] = _sanitize_temporal_facts(
@@ -576,6 +822,10 @@ def research_topic(
             combined_results.append(row)
         raw["results"] = combined_results
         raw["seeded_results"] = len(seed_results)
+    raw["results"] = rank_search_results(
+        list(raw.get("results") or []),
+        max(8, max_results * 2),
+    )
     anchors = [
         re.sub(r"\s+", "", str(value or "")).casefold()
         for value in subject_anchors or []

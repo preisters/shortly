@@ -20,11 +20,12 @@ from .generate.capcut_export import (export_capcut_draft,
 from .generate.guide import build_guide, render_guide_markdown
 from .generate.image_reco import recommend_cuts
 from .generate.research import research_topic
-from .generate.factcheck import factcheck_script
+from .generate.factcheck import apply_factcheck_repairs, factcheck_script
 from .generate.script_gen import (
-    apply_revision_scope,
+    analyze_story_flow,
     extract_subject_anchors,
     generate_script,
+    polish_story_flow,
     revise_script,
     script_preserves_subject,
 )
@@ -39,6 +40,70 @@ Progress = Callable[[str, Optional[int], Optional[int]], None]
 
 def _noop(msg: str, cur: Optional[int] = None, total: Optional[int] = None) -> None:
     log.info(msg)
+
+
+def _script_changed(left: Dict, right: Dict) -> bool:
+    fields = ("title", "hook", "segments")
+    return any(left.get(field) != right.get(field) for field in fields)
+
+
+def _finalize_story_quality(
+    llm,
+    profile: Dict,
+    script: Dict,
+    research: Optional[Dict],
+    *,
+    instruction: str = "",
+) -> tuple[Dict, Dict]:
+    """Run a final flow gate after factcheck and record evidence quality."""
+
+    before = analyze_story_flow(script)
+    final_script = script
+    if before:
+        final_script = polish_story_flow(
+            llm,
+            profile,
+            script,
+            instruction=instruction,
+            original_script=script if instruction else None,
+        )
+    after = analyze_story_flow(final_script)
+    tiers: Dict[str, int] = {}
+    for result in (research or {}).get("results") or []:
+        if not isinstance(result, dict):
+            continue
+        tier = str(result.get("source_tier") or "general")
+        tiers[tier] = tiers.get(tier, 0) + 1
+    hard_fact_count = len((research or {}).get("hard_facts") or [])
+    credible_source_count = (
+        tiers.get("authoritative", 0) + tiers.get("editorial", 0)
+    )
+    if hard_fact_count and credible_source_count >= 2:
+        evidence_status = "strong"
+    elif hard_fact_count:
+        evidence_status = "usable"
+    else:
+        evidence_status = "thin"
+    metadata = {
+        "story_flow": {
+            "issues_before_final_pass": before,
+            "issues_after_final_pass": after,
+            "changed": _script_changed(script, final_script),
+            "rejected": final_script.get("_flow_rejected"),
+        },
+        "research_evidence": {
+            "result_count": len((research or {}).get("results") or []),
+            "source_tiers": tiers,
+            "credible_source_count": credible_source_count,
+            "quantified_fact_count": len(
+                (research or {}).get("quantified_facts") or []
+            ),
+            "hard_fact_count": hard_fact_count,
+            "thin": bool((research or {}).get("thin", not research)),
+            "status": evidence_status,
+        },
+    }
+    return final_script, metadata
 
 
 # --------------------------------------------------------------------------
@@ -497,6 +562,7 @@ def get_guide(channel_input: str, name: str,
         "name": name,
         "request": read_json(target / "request.json", default=None),
         "guide": read_json(target / "guide.json", default={}),
+        "quality": read_json(target / "quality.json", default={}),
         "guide_md": md.read_text(encoding="utf-8") if md.is_file() else "",
         "output_dir": str(target),
         "capcut_path": str(capcut) if capcut.is_file() else None,
@@ -513,6 +579,7 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
 
     llm = get_llm(settings, role="generation")
     research = None
+    initial_subject_anchors = extract_subject_anchors({}, text)
     # 주제 모드: 웹 조사로 팩트/각도 보강(대본 모드·비활성 설정이면 스킵)
     if (not is_script) and getattr(settings, "research_enabled", True):
         progress("웹 조사 중...", None, None)
@@ -521,6 +588,7 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
             text, llm=llm,
             max_results=getattr(settings, "research_max_results", 8),
             max_queries=getattr(settings, "research_max_queries", 4),
+            subject_anchors=initial_subject_anchors,
         )
         n = len((research or {}).get("results") or [])
         hf = len((research or {}).get("hard_facts") or [])
@@ -554,12 +622,48 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
             "extra_results": fc.get("extra_results") or [],
         }
         if fc.get("changed") and fc.get("script"):
-            script = fc["script"]
-            progress(
-                f"팩트체크 수정 반영 ({len(factcheck_meta['fixes'])}건)",
-                None, None)
+            repaired_script = apply_factcheck_repairs(
+                script,
+                fc["script"],
+                issues=factcheck_meta["issues"],
+                fixes=factcheck_meta["fixes"],
+            )
+            if repaired_script.get("_factcheck_rejected"):
+                factcheck_meta["changed"] = False
+                factcheck_meta["application_rejected"] = (
+                    repaired_script["_factcheck_rejected"]
+                )
+                progress("팩트체크 구조 변경 거부 (기존 대본 유지)", None, None)
+            else:
+                script = repaired_script
+                progress(
+                    f"팩트체크 수정 반영 ({len(factcheck_meta['fixes'])}건)",
+                    None, None)
         else:
             progress("팩트체크 완료 (수정 없음)", None, None)
+
+    quality_meta: Dict = {}
+    if not is_script:
+        flow_issues = analyze_story_flow(script)
+        if flow_issues:
+            progress("최종 이야기 흐름 정리 중...", None, None)
+        script, quality_meta = _finalize_story_quality(
+            llm,
+            profile,
+            script,
+            research,
+        )
+        if flow_issues:
+            remaining = quality_meta["story_flow"]["issues_after_final_pass"]
+            progress(
+                (
+                    "최종 이야기 흐름 정리 완료"
+                    if not remaining
+                    else f"흐름 점검 완료 (남은 주의 {len(remaining)}건)"
+                ),
+                None,
+                None,
+            )
 
     progress("제작 가이드 구성 중...", None, None)
     guide = build_guide(profile, script)
@@ -583,6 +687,12 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
                                             or research.get("hard_facts"))),
         "factcheck_used": bool(factcheck_meta and not factcheck_meta.get("skipped")),
         "factcheck_changed": bool(factcheck_meta and factcheck_meta.get("changed")),
+        "quality_gate_used": bool(quality_meta),
+        "quality_gate_passed": not bool(
+            (quality_meta.get("story_flow") or {}).get(
+                "issues_after_final_pass"
+            )
+        ),
     }
     write_json(out_dir / "request.json", request_meta)
     write_json(out_dir / "script.json", script)
@@ -592,6 +702,8 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
         write_json(out_dir / "research.json", research)
     if factcheck_meta is not None:
         write_json(out_dir / "factcheck.json", factcheck_meta)
+    if quality_meta:
+        write_json(out_dir / "quality.json", quality_meta)
     (out_dir / "guide.md").write_text(guide_md, encoding="utf-8")
 
     progress("CapCut 초안 생성 중...", None, None)
@@ -606,6 +718,7 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
         "guide": guide,
         "guide_md": guide_md,
         "research": research,
+        "quality": quality_meta,
         "output_dir": str(out_dir),
         "capcut_path": str(capcut_path),
     }
@@ -844,12 +957,23 @@ def revise_guide(channel_input: str, name: str, instruction: str,
             "extra_results": fc.get("extra_results") or [],
         }
         if fc.get("changed") and fc.get("script"):
-            scoped_factcheck_script = apply_revision_scope(
+            scoped_factcheck_script = apply_factcheck_repairs(
                 script,
                 fc["script"],
-                instruction,
+                issues=factcheck_meta["issues"],
+                fixes=factcheck_meta["fixes"],
             )
-            if script_preserves_subject(
+            if scoped_factcheck_script.get("_factcheck_rejected"):
+                factcheck_meta["changed"] = False
+                factcheck_meta["application_rejected"] = (
+                    scoped_factcheck_script["_factcheck_rejected"]
+                )
+                progress(
+                    "팩트체크 구조 변경 거부 (수정 전 대본 유지)",
+                    None,
+                    None,
+                )
+            elif script_preserves_subject(
                 scoped_factcheck_script,
                 subject_anchors,
             ):
@@ -866,6 +990,28 @@ def revise_guide(channel_input: str, name: str, instruction: str,
                 progress("팩트체크 주체 변경 거부 (수정 전 대본 유지)", None, None)
         else:
             progress("팩트체크 완료 (수정 없음)", None, None)
+
+    flow_issues = analyze_story_flow(script)
+    if flow_issues:
+        progress("최종 이야기 흐름 정리 중...", None, None)
+    script, quality_meta = _finalize_story_quality(
+        llm,
+        profile,
+        script,
+        research,
+        instruction=instruction,
+    )
+    if flow_issues:
+        remaining = quality_meta["story_flow"]["issues_after_final_pass"]
+        progress(
+            (
+                "최종 이야기 흐름 정리 완료"
+                if not remaining
+                else f"흐름 점검 완료 (남은 주의 {len(remaining)}건)"
+            ),
+            None,
+            None,
+        )
 
     progress("제작 가이드 재구성 중...", None, None)
     guide = build_guide(profile, script)
@@ -894,6 +1040,10 @@ def revise_guide(channel_input: str, name: str, instruction: str,
                                             or research.get("hard_facts"))),
         "factcheck_used": bool(factcheck_meta and not factcheck_meta.get("skipped")),
         "factcheck_changed": bool(factcheck_meta and factcheck_meta.get("changed")),
+        "quality_gate_used": True,
+        "quality_gate_passed": not bool(
+            quality_meta["story_flow"]["issues_after_final_pass"]
+        ),
     }
     write_json(out_dir / "request.json", request_meta)
     write_json(out_dir / "script.json", script)
@@ -902,6 +1052,7 @@ def revise_guide(channel_input: str, name: str, instruction: str,
         write_json(out_dir / "research.json", research)
     if factcheck_meta is not None:
         write_json(out_dir / "factcheck.json", factcheck_meta)
+    write_json(out_dir / "quality.json", quality_meta)
     (out_dir / "guide.md").write_text(guide_md, encoding="utf-8")
 
     progress("CapCut 초안 생성 중...", None, None)
@@ -915,6 +1066,7 @@ def revise_guide(channel_input: str, name: str, instruction: str,
         "script": script,
         "guide": guide,
         "guide_md": guide_md,
+        "quality": quality_meta,
         "output_dir": str(out_dir),
         "capcut_path": str(capcut_path),
         "source_guide_name": name,

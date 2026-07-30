@@ -37,8 +37,38 @@ class _FlowPolishLlm(LLMClient):
                 {"index": 2, "text": "주인공 공개", "intent": "reveal"},
                 {"index": 3, "text": "갈등 발생", "intent": "conflict"},
                 {"index": 4, "text": "결정적인 선택", "intent": "choice"},
-                {"index": 5, "text": "선택의 대가", "intent": "cost"},
-                {"index": 6, "text": "해외 성과로 훅 회수", "intent": "payoff"},
+                {
+                    "index": 5,
+                    "text": "2024년 수출 비중은 1%에서 40%로 커졌고",
+                    "intent": "cost",
+                },
+                {
+                    "index": 6,
+                    "text": "수출 2위와 국내 품절로 훅 회수",
+                    "intent": "payoff",
+                },
+            ],
+        }
+
+
+class _NumericDriftFlowLlm(LLMClient):
+    available = True
+
+    def complete_json(self, *args, **kwargs):
+        return {
+            "title": "fixture",
+            "hook": "fixture",
+            "segments": [
+                {"index": 1, "text": "강한 훅", "intent": "hook"},
+                {"index": 2, "text": "주인공 공개", "intent": "reveal"},
+                {"index": 3, "text": "갈등 발생", "intent": "conflict"},
+                {"index": 4, "text": "선택", "intent": "choice"},
+                {"index": 5, "text": "대가", "intent": "cost"},
+                {
+                    "index": 6,
+                    "text": "2024년 수출 비중이 50%까지 커졌다고",
+                    "intent": "payoff",
+                },
             ],
         }
 
@@ -168,6 +198,42 @@ class GenerationContractTests(unittest.TestCase):
         self.assertEqual(
             revised["segments"][1]["text"],
             "해외에서 잘 팔리는 마무리",
+        )
+
+    def test_closing_only_revision_can_split_overloaded_ending(self) -> None:
+        original = {
+            "title": "원래 제목",
+            "hook": "원래 제목",
+            "segments": [
+                {"index": 1, "text": "훅"},
+                {"index": 2, "text": "기존 마무리"},
+            ],
+        }
+        candidate = {
+            "title": "바뀐 제목",
+            "hook": "바뀐 제목",
+            "segments": [
+                {"index": 1, "text": "다시 쓴 훅"},
+                {"index": 2, "text": "해외 반응"},
+                {"index": 3, "text": "수출 성장"},
+                {"index": 4, "text": "품절로 마무리"},
+            ],
+        }
+
+        revised = apply_revision_scope(
+            original,
+            candidate,
+            "마무리만 더 매끄럽게 바꿔줘",
+        )
+
+        self.assertEqual(revised["title"], "원래 제목")
+        self.assertEqual(
+            [segment["text"] for segment in revised["segments"]],
+            ["훅", "해외 반응", "수출 성장", "품절로 마무리"],
+        )
+        self.assertEqual(
+            [segment["index"] for segment in revised["segments"]],
+            [1, 2, 3, 4],
         )
 
     def test_revision_lineage_recovers_root_topic_and_prior_evidence(
@@ -337,6 +403,39 @@ class GenerationContractTests(unittest.TestCase):
         self.assertEqual(llm.calls, 1)
         self.assertTrue(polished["_source"].endswith("+flow"))
         self.assertEqual(analyze_story_flow(polished), [])
+
+    def test_flow_polish_rejects_changed_factchecked_numbers(self) -> None:
+        script = {
+            "title": "fixture",
+            "hook": "fixture",
+            "segments": [
+                {"index": 1, "text": "강한 훅"},
+                {"index": 2, "text": "주인공 공개"},
+                {"index": 3, "text": "갈등 발생"},
+                {"index": 4, "text": "결정적인 선택"},
+                {"index": 5, "text": "선택의 대가"},
+                {
+                    "index": 6,
+                    "text": (
+                        "2024년 기준 수출 비중 1%에서 40%, 수출 2위, "
+                        "국내 품절까지 한꺼번에 설명하는 마무리"
+                    ),
+                },
+            ],
+            "_source": "llm+factcheck",
+        }
+
+        polished = polish_story_flow(
+            _NumericDriftFlowLlm(),
+            {},
+            script,
+        )
+
+        self.assertEqual(polished["segments"], script["segments"])
+        self.assertEqual(
+            polished["_flow_rejected"],
+            "numeric_claims_changed",
+        )
 
 
 if __name__ == "__main__":

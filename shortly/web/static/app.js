@@ -92,7 +92,7 @@ function applyPortableUI(s) {
       $("portable-learn-model").textContent = s.portable_analysis_model || s.text_model || "claude-sonnet-5";
     }
     if ($("portable-gen-model")) {
-      $("portable-gen-model").textContent = s.portable_generation_model || s.gen_effective_model || "claude-opus-4-8";
+      $("portable-gen-model").textContent = s.portable_generation_model || s.gen_effective_model || "claude-opus-5";
     }
     const key = $("set-key-portable");
     if (key) {
@@ -483,6 +483,32 @@ function guideNameFromDir(dir) {
   return String(dir || "").split(/[\\/]/).filter(Boolean).pop() || "";
 }
 
+function qualityNotice(quality) {
+  const story = (quality && quality.story_flow) || {};
+  const evidence = (quality && quality.research_evidence) || {};
+  const issues = story.issues_after_final_pass || [];
+  if (issues.length) {
+    return (
+      `<div class="quality-notice warn"><b>흐름 확인 필요</b>` +
+      `<span>${escapeHtml(issues.join(" · "))}</span></div>`
+    );
+  }
+  if (evidence.status === "thin") {
+    return (
+      `<div class="quality-notice warn"><b>근거 자료가 부족합니다</b>` +
+      `<span>대본은 생성했지만, 공개 검색에서 확인된 하드 팩트가 적습니다. ` +
+      `중요한 주장과 수치는 내보내기 전에 직접 확인해 주세요.</span></div>`
+    );
+  }
+  if (evidence.status === "strong") {
+    return (
+      `<div class="quality-notice ok"><b>자동 품질 점검 통과</b>` +
+      `<span>이야기 흐름과 주요 출처 구성을 확인했습니다.</span></div>`
+    );
+  }
+  return "";
+}
+
 async function openSavedGuide(channel, name, li) {
   document.querySelectorAll("#saved-guides-list li").forEach((el) => el.classList.remove("active"));
   if (li) li.classList.add("active");
@@ -499,7 +525,8 @@ async function openSavedGuide(channel, name, li) {
         `<div class="g-input-orig"><div class="g-input-orig-label">${typeLabel}</div>` +
         `<div class="g-input-orig-text">${escapeHtml(g.request.input_text)}</div></div>`;
     }
-    $("saved-guide-result").innerHTML = inputBlock + mdToHtml(g.guide_md || "(내용 없음)");
+    $("saved-guide-result").innerHTML =
+      inputBlock + qualityNotice(g.quality) + mdToHtml(g.guide_md || "(내용 없음)");
     const dl = $("saved-guide-downloads");
     const mk = (label, path) => {
       const a = document.createElement("a");
@@ -570,7 +597,8 @@ function addReviseForm(container, channel, name) {
         if (r.ok && r.guide_md) {
           status.className = "capcut-status ok";
           status.textContent = "완료! 수정본이 새 가이드로 저장되었습니다.";
-          $("saved-guide-result").innerHTML = mdToHtml(r.guide_md);
+          $("saved-guide-result").innerHTML =
+            qualityNotice(r.quality) + mdToHtml(r.guide_md);
           const gname = guideNameFromDir(r.output_dir);
           const dl = $("saved-guide-downloads");
           dl.innerHTML = "";
@@ -648,7 +676,8 @@ $("btn-guide").onclick = async () => {
       btn.disabled = false;
       const r = job.result || {};
       if (r.ok && r.guide_md) {
-        $("guide-result").innerHTML = mdToHtml(r.guide_md);
+        $("guide-result").innerHTML =
+          qualityNotice(r.quality) + mdToHtml(r.guide_md);
         const dl = $("guide-downloads");
         const mk = (label, path) => {
           const a = document.createElement("a");

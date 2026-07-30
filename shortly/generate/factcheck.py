@@ -94,7 +94,8 @@ def _format_research(research: Optional[Dict]) -> str:
         snips = []
         for i, r in enumerate(results[:10], 1):
             snips.append(
-                f"{i}. {r.get('title', '')}\n"
+                f"{i}. [{r.get('source_tier', 'general')}] "
+                f"{r.get('title', '')}\n"
                 f"   {r.get('snippet', '')}\n"
                 f"   ({r.get('url', '')})"
             )
@@ -211,6 +212,82 @@ def _heuristic_flags(script: Dict, research: Optional[Dict]) -> List[str]:
     return flags
 
 
+_SEGMENT_REFERENCE = re.compile(
+    r"(?:세그먼트|문장|비트)\s*#?\s*(\d+)",
+    re.I,
+)
+
+
+def apply_factcheck_repairs(
+    original_script: Dict,
+    candidate_script: Dict,
+    *,
+    issues: Optional[List[str]] = None,
+    fixes: Optional[List[str]] = None,
+) -> Dict:
+    """Apply factual repairs without letting the checker rewrite safe beats.
+
+    The user's revision scope protects creative intent, but it must never undo a
+    factual correction elsewhere in the script. When the checker names segment
+    numbers, only those beats are accepted. If it does not name any segment, the
+    candidate is retained because there is no deterministic way to isolate the
+    repair.
+    """
+
+    original_segments = [
+        value
+        for value in original_script.get("segments") or []
+        if isinstance(value, dict)
+    ]
+    candidate_segments = [
+        value
+        for value in candidate_script.get("segments") or []
+        if isinstance(value, dict)
+    ]
+    if not original_segments:
+        return original_script
+    if len(original_segments) != len(candidate_segments):
+        rejected = dict(original_script)
+        rejected["_factcheck_rejected"] = "segment_count_changed"
+        return rejected
+
+    references = {
+        int(match.group(1))
+        for text in [*(issues or []), *(fixes or [])]
+        for match in _SEGMENT_REFERENCE.finditer(str(text))
+    }
+    if not references:
+        return candidate_script
+
+    merged = dict(original_script)
+    repaired = []
+    for position, (original, candidate) in enumerate(
+        zip(original_segments, candidate_segments),
+        1,
+    ):
+        if position in references:
+            repaired.append(dict(candidate))
+        else:
+            repaired.append(dict(original))
+    merged["segments"] = repaired
+    metadata_blob = " ".join([*(issues or []), *(fixes or [])])
+    if re.search(r"(제목|타이틀)", metadata_blob):
+        merged["title"] = candidate_script.get(
+            "title",
+            original_script.get("title"),
+        )
+    if re.search(r"(훅|hook)", metadata_blob, re.I):
+        merged["hook"] = candidate_script.get(
+            "hook",
+            original_script.get("hook"),
+        )
+    merged["_source"] = candidate_script.get(
+        "_source",
+        original_script.get("_source"),
+    )
+    return merged
+
+
 def factcheck_script(
     llm: Optional[LLMClient],
     script: Dict,
@@ -286,7 +363,9 @@ def factcheck_script(
         "6) 인수·계약·협상은 기사 본문의 최종 상태까지 확인한다. 제목이 검토설이어도 "
         "본문에 당사자의 부인이나 결렬이 있으면 그 상태를 반영한다.\n"
         "7) 대본 수정 요청이 함께 제공되면 그 요청의 방향과 수정 범위를 보존한다. "
-        "예를 들어 '마무리만'이면 다른 세그먼트·제목을 바꾸지 않는다. 요청한 세부 수치가 "
+        "예를 들어 '마무리만'이면 사실 오류가 없는 다른 세그먼트·제목을 바꾸지 않는다. "
+        "단, 수정 범위 밖에서 치명적인 사실 오류를 발견하면 그 오류 구절만 고치고 "
+        "issues와 fixes에 반드시 '세그먼트 N'을 명시한다. 요청한 세부 수치가 "
         "불확실하면 검증된 같은 방향의 사실로 완화하되, 사용자가 제거하라고 한 문장이나 "
         "전혀 다른 결말을 되살리지 않는다.\n"
         "8) 문제 없으면 changed=false, script는 원문 그대로.\n"

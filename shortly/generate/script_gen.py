@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from collections import Counter
 from typing import Dict, List, Optional
 
 from ..llm.base import LLMClient, LLMError
@@ -48,7 +49,10 @@ _SYSTEM_PROMPT = (
     "가장 중요(이야기 구조): 훅→정체 공개→구체적 상황→선택/대치→대가→반전/보상 순으로 "
     "정보를 공개하되, 소재에 맞지 않는 단계는 합치거나 생략한다. 각 세그먼트는 앞 문장에 없던 "
     "새 정보나 감정 변화를 하나씩 추가해야 한다. 인접 세그먼트에서 같은 사실을 표현만 바꿔 "
-    "반복하지 마라. 마지막은 훅에서 약속한 궁금증을 가장 강한 검증 사실 하나로 회수한다.\n"
+    "반복하지 마라. 마지막은 훅에서 약속한 궁금증을 주인공 회사·제품의 가장 강한 검증 사실 "
+    "하나로 회수한다. 사용자가 비교를 요청하지 않았다면 비슷한 사건의 다른 회사, 주변 인물, "
+    "후속 캠페인 같은 곁가지를 새 결말로 삼지 마라. 요청한 결말 방향의 근거가 부족하면 "
+    "다른 주체의 사실로 바꾸지 말고, 주인공에게 확인된 가장 가까운 결과만 정직하게 써라.\n"
     "가장 중요(말투): [실제 대사 예시]와 [자주 쓰는 문장 끝맺음]은 참고하되 오류·잘린 문장·"
     "불필요한 반복은 모방하지 마라. "
     "이 채널은 '썰 풀어주는' 반말 나레이션체다. '~다고 함', '~했는데', '~다는데', '~라고' 같은 "
@@ -436,6 +440,21 @@ def analyze_story_flow(script: Dict) -> List[str]:
     return list(dict.fromkeys(issues))
 
 
+def _numeric_signature(script: Dict) -> Counter:
+    """Keep factchecked numbers stable during a flow-only rewrite."""
+
+    values = []
+    for segment in script.get("segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        text = str(segment.get("text") or "")
+        values.extend(
+            value.replace(",", "")
+            for value in re.findall(r"\d[\d,.]*", text)
+        )
+    return Counter(values)
+
+
 def polish_story_flow(
     llm: LLMClient,
     profile: Dict,
@@ -499,6 +518,12 @@ def polish_story_flow(
         script.get("_source") or "llm"
     ) + "+flow"
     candidate["_flow_issues_before"] = issues
+    if _numeric_signature(candidate) != _numeric_signature(script):
+        result = copy.deepcopy(script)
+        result["_flow_issues"] = issues
+        result["_flow_rejected"] = "numeric_claims_changed"
+        log.warning("대본 흐름 보정 거부: 검증된 숫자 구성이 변경됨")
+        return result
     remaining = analyze_story_flow(candidate)
     if remaining:
         candidate["_flow_issues"] = remaining
@@ -647,14 +672,23 @@ def apply_revision_scope(
             merged["hook"] = line
     elif original_segments and candidate_segments:
         if closing_only:
-            replacement = copy.deepcopy(candidate_segments[-1])
-            replacement["index"] = original_segments[-1].get(
-                "index",
-                len(original_segments),
+            added_count = max(
+                0,
+                len(candidate_segments) - len(original_segments),
             )
+            tail_count = min(4, 1 + added_count)
+            tail = copy.deepcopy(candidate_segments[-tail_count:])
+            first_index = int(
+                original_segments[-1].get(
+                    "index",
+                    len(original_segments),
+                )
+            )
+            for offset, segment in enumerate(tail):
+                segment["index"] = first_index + offset
             merged["segments"] = [
                 *copy.deepcopy(original_segments[:-1]),
-                replacement,
+                *tail,
             ]
         else:
             keep_count = max(1, len(original_segments) // 2)
@@ -696,7 +730,8 @@ def generate_script(llm: LLMClient, profile: Dict, text: str, is_script: bool = 
         "한 방으로 살려라(요구→거절→포기 등). "
         "'수출이 어려워져서 포기'처럼 수동 요약하지 마라. "
         "훅 다음을 '사실,' 로 시작하지 마라. "
-        "없는 인정 요구·주체 뒤집기만 금지한다.\n"
+        "없는 인정 요구·주체 뒤집기만 금지한다. 끝까지 사용자 주제의 주인공을 유지하고, "
+        "비슷한 사건의 다른 회사는 사용자가 비교를 요구한 경우가 아니면 대본에서 제외한다.\n"
         f"{research_txt}"
         f"[사용자 주제/메모]\n{text}"
     )

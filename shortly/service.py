@@ -537,7 +537,7 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
 
     factcheck_meta = None
     if (not is_script) and getattr(settings, "factcheck_enabled", True):
-        progress("팩트체크 중 (시점·주체)...", None, None)
+        progress("팩트체크 중 (시점·주체·수치 범위)...", None, None)
         fc = factcheck_script(
             llm, script, research=research, topic=text, force=True)
         factcheck_meta = {
@@ -676,7 +676,7 @@ def revise_guide(channel_input: str, name: str, instruction: str,
 
     factcheck_meta = None
     if getattr(settings, "factcheck_enabled", True):
-        progress("팩트체크 중 (시점·주체)...", None, None)
+        progress("팩트체크 중 (시점·주체·수치 범위)...", None, None)
         seed = "\n".join(x for x in [
             str(original_request.get("input_text") or ""),
             str(script.get("title") or ""),

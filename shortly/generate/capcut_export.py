@@ -1053,6 +1053,7 @@ _INTRO_DEFAULT_US = 1_000_000  # blank_10 인트로를 못 찾을 때 기본 인
 _INTRO_CLICK_LEAD_US = 133_333  # 수동 레퍼런스 3개의 컷 전환 클릭음 중앙값
 _START_SFX_MARKERS = ("띠링", "시작")
 _CLICK_SFX_MARKERS = ("클릭음",)
+_AI_DISCLOSURE_MARKERS = ("AI 생성", "실존 인물이 아닙니다")
 
 
 def _tts_cache_path(cfg, cache_dir: Path, text: str,
@@ -1242,6 +1243,48 @@ def _find_reference_audio_template(root: Path, markers: Tuple[str, ...]):
                 "project": project.name,
                 "name": found["material"].get("name") or "",
             }
+    return None
+
+
+def _find_reference_text_template(root: Path, markers: Tuple[str, ...]):
+    """Find a text segment with the requested wording in manual references."""
+
+    try:
+        projects = [
+            path
+            for path in root.iterdir()
+            if path.is_dir()
+            and (path / "draft_content.json").is_file()
+            and any(
+                marker in path.name
+                for marker in _REFERENCE_PROJECT_MARKERS
+            )
+        ]
+    except OSError:
+        return None
+    projects.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    lowered = tuple(marker.casefold() for marker in markers)
+    for project in projects:
+        try:
+            document = _read_json(project / "draft_content.json")
+        except (OSError, ValueError):
+            continue
+        materials = document.get("materials") or {}
+        index = _index_materials(materials)
+        for track in document.get("tracks") or []:
+            if track.get("type") != "text":
+                continue
+            for segment in track.get("segments") or []:
+                info = index.get(segment.get("material_id"))
+                if not info:
+                    continue
+                text = _text_of(info[1]).casefold()
+                if all(marker in text for marker in lowered):
+                    return {
+                        "seg": segment,
+                        "materials": materials,
+                        "project": project.name,
+                    }
     return None
 
 
@@ -2193,6 +2236,12 @@ def export_via_template(guide: Dict,
     # 5) 선택된 생성 에셋. 원본 종횡비를 유지하고, 지정 레퍼런스 프로젝트의
     # 수동 조정 분포를 기준으로 하되 두 줄 자막 안전 영역만큼 축소·하향한다.
     cut_segs: List[Dict] = []
+    disclosure_segs: List[Dict] = []
+    disclosure_template = (
+        _find_reference_text_template(root, _AI_DISCLOSURE_MARKERS)
+        if cut_assets
+        else None
+    )
     reference_template = _pick_reference_image_template(root)
     if reference_template is None:
         _, _, reference_template = _pick_templates(root)
@@ -2252,6 +2301,37 @@ def export_via_template(guide: Dict,
                 video_segment["extra_material_refs"] = []
                 _merge_materials(mats, cloned_video)
                 cut_segs.append(video_segment)
+                disclosure_text = str(
+                    selected.get("disclosure_text") or ""
+                ).strip()
+                if disclosure_text:
+                    if disclosure_template is not None:
+                        disclosure_seg, disclosure_materials = (
+                            _build_caption_seg(
+                                disclosure_template["seg"],
+                                disclosure_template["materials"],
+                                disclosure_text,
+                                cut_start,
+                                cut_duration,
+                                None,
+                                render_index=21000 + cut_no,
+                            )
+                        )
+                    else:
+                        disclosure_seg, disclosure_materials = (
+                            _build_caption_seg(
+                                cap_style_seg,
+                                mats,
+                                disclosure_text,
+                                cut_start,
+                                cut_duration,
+                                -0.78,
+                                render_index=21000 + cut_no,
+                                scale=0.34,
+                            )
+                        )
+                    _merge_materials(mats, disclosure_materials)
+                    disclosure_segs.append(disclosure_seg)
 
     # 6) TTS 오디오 트랙(제목 + 대사)
     audio_segs: List[Dict] = []
@@ -2290,6 +2370,8 @@ def export_via_template(guide: Dict,
         tracks.append(_track("text", reco_segs))
     for layer in sorted(caption_layers):
         tracks.append(_track("text", caption_layers[layer]))
+    if disclosure_segs:
+        tracks.append(_track("text", disclosure_segs))
     if audio_segs:
         tracks.append(_track("audio", audio_segs))
 
@@ -2340,6 +2422,12 @@ def export_via_template(guide: Dict,
         "segments": len(caption_segs),
         "reco_memos": len(reco_segs),
         "inserted_assets": len(cut_segs),
+        "ai_person_disclosures": len(disclosure_segs),
+        "ai_disclosure_reference": (
+            disclosure_template.get("project")
+            if disclosure_template is not None
+            else None
+        ),
         "asset_layout_reference": reference_project,
         "tts_generated": plan["audio_ok"],
         "tts_reused": plan.get("audio_reused", 0) + (1 if title_reused else 0),

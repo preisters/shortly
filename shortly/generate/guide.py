@@ -145,6 +145,10 @@ def render_guide_markdown(guide: Dict) -> str:
             ]
             if queries:
                 lines.append(f"- 스톡 검색어: {', '.join(queries)}")
+        if s.get("ai_disclosure_suggestions") and any(
+            s["ai_disclosure_suggestions"]
+        ):
+            lines.append("- 가상 인물 고지: 해당 생성 컷에 자동 표시")
         if s.get("effect_suggestions"):
             lines.append(f"- 효과 추천: {', '.join(s['effect_suggestions'])}")
     g = guide.get("global_notes", {})

@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 from ....config import get_settings
 from ....core.domain.assets import AssetType, CandidateStatus, MediaKind
 from ....core.use_cases.build_cut_manifest import (
+    AI_PERSON_IMAGE_DISCLOSURE,
+    AI_PERSON_VIDEO_DISCLOSURE,
     ASSET_CLASSIFIER_VERSION,
     build_cut_manifest,
 )
@@ -297,6 +299,14 @@ def create_router(
                 if target is AssetType.GENERATED_VIDEO
                 else MediaKind.IMAGE
             )
+            if cut.person_depiction == "fictional_person":
+                cut.disclosure_text = (
+                    AI_PERSON_VIDEO_DISCLOSURE
+                    if target is AssetType.GENERATED_VIDEO
+                    else AI_PERSON_IMAGE_DISCLOSURE
+                    if target is AssetType.GENERATED_IMAGE
+                    else ""
+                )
             store.save_manifest(manifest)
             store.record_selection(
                 manifest_id=manifest_id,

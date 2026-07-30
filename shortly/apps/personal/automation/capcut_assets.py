@@ -96,6 +96,15 @@ def prepare_export(
             "path": str(path.resolve()),
             "media_kind": candidate.media_kind.value,
             "candidate_id": candidate.id,
+            "disclosure_text": (
+                cut.disclosure_text
+                if cut.asset_type
+                in (
+                    AssetType.GENERATED_IMAGE,
+                    AssetType.GENERATED_VIDEO,
+                )
+                else ""
+            ),
         }
     if missing:
         raise ValueError(

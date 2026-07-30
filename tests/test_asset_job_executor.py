@@ -14,7 +14,7 @@ from shortly.apps.personal.automation.store import (
     AutomationStore,
     BudgetExceededError,
 )
-from shortly.core.domain.assets import CandidateStatus
+from shortly.core.domain.assets import AssetType, CandidateStatus
 from shortly.core.use_cases.build_cut_manifest import build_cut_manifest
 
 
@@ -106,6 +106,32 @@ class AssetJobExecutorTests(unittest.TestCase):
         self.assertIn("1024x1536", prompt)
         self.assertIn("safe margins", prompt)
         self.assertIn("Do not add captions", prompt)
+        self.assertIn("charts, graphs", prompt)
+        self.assertIn("geographic maps", prompt)
+
+    def test_fictional_person_prompt_does_not_copy_real_identity(self) -> None:
+        prompt = _image_generation_prompt(
+            "가상의 기업 대표가 말하는 장면",
+            disclosure_text="실존 인물이 아닙니다.",
+        )
+
+        self.assertIn("fictional adult", prompt)
+        self.assertIn("does not resemble a specific real person", prompt)
+
+    def test_exact_data_visual_cannot_be_queued_for_generation(self) -> None:
+        cut = self.manifest.cuts[0]
+        cut.asset_type = AssetType.GENERATED_IMAGE
+        cut.prompt = "2023년 매출 4억 달러 상승 그래프"
+        self.store.save_manifest(self.manifest)
+
+        with self.assertRaisesRegex(ValueError, "자동 생성할 수 없습니다"):
+            self.executor.queue_cut(
+                manifest_id=self.manifest.manifest_id,
+                cut_id=cut.id,
+                provider="fake",
+                model="fixture",
+                estimated_cost_usd=0.02,
+            )
 
 
 if __name__ == "__main__":

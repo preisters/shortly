@@ -29,6 +29,7 @@ from shortly.generate.capcut_export import (
     _caption_pages,
     _caption_safe_korean,
     _ensure_intro_start_sfx,
+    _find_reference_text_template,
     _intro_timing,
     _place_intro_transition_click,
     _plan_sentences,
@@ -121,6 +122,10 @@ class PersonalReviewAndExportTests(unittest.TestCase):
             asset.write_bytes(b"fixture")
             cut = manifest.cuts[0]
             cut.asset_type = AssetType.GENERATED_IMAGE
+            cut.disclosure_text = (
+                "이 이미지는 이해를 돕기 위한 AI 생성\n"
+                "이미지이며, 실존 인물이 아닙니다."
+            )
             candidate = AssetCandidate(
                 provider="fake",
                 model="fake",
@@ -158,7 +163,65 @@ class PersonalReviewAndExportTests(unittest.TestCase):
             self.assertEqual(
                 prepared.cut_assets["s000-c00"]["path"], str(asset.resolve())
             )
+            self.assertIn(
+                "실존 인물이 아닙니다",
+                prepared.cut_assets["s000-c00"]["disclosure_text"],
+            )
             self.assertEqual(list(capcut.iterdir()), [])
+
+    def test_ai_person_disclosure_style_is_found_in_manual_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "사실 너만 모르던 스테디셀러 떡"
+            reference.mkdir()
+            material_id = "disclosure-material"
+            (reference / "draft_content.json").write_text(
+                __import__("json").dumps(
+                    {
+                        "materials": {
+                            "texts": [
+                                {
+                                    "id": material_id,
+                                    "type": "text",
+                                    "content": __import__("json").dumps(
+                                        {
+                                            "text": (
+                                                "이 이미지는 이해를 돕기 위한 AI 생성\n"
+                                                "이미지이며, 실존 인물이 아닙니다."
+                                            )
+                                        },
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                            ]
+                        },
+                        "tracks": [
+                            {
+                                "type": "text",
+                                "segments": [
+                                    {
+                                        "material_id": material_id,
+                                        "target_timerange": {
+                                            "start": 0,
+                                            "duration": 1_000_000,
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            template = _find_reference_text_template(
+                root,
+                ("AI 생성", "실존 인물이 아닙니다"),
+            )
+
+        self.assertIsNotNone(template)
+        self.assertEqual(template["project"], reference.name)
 
     def test_prepare_export_blocks_unselected_stock_cut(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

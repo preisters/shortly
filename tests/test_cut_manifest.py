@@ -78,6 +78,11 @@ class _AssetDirectorLlm(LLMClient):
                         "실제 포장 외형과 문구가 정확해야 함",
                     ],
                     "stock_query_suggestions": ["", ""],
+                    "person_depiction_suggestions": [
+                        "fictional_person",
+                        "none",
+                    ],
+                    "ai_disclosure_suggestions": [True, False],
                 }
             ]
         }
@@ -116,6 +121,7 @@ class CutManifestTests(unittest.TestCase):
         self.assertIn("/stock-search?", page)
         self.assertIn("/stock-select", page)
         self.assertIn("cut.stock_query||cut.prompt", page)
+        self.assertIn("가상 인물 고지", page)
         self.assertIn("CC BY 결과도 포함", page)
         self.assertIn("현재 선택은 해제됩니다", page)
         self.assertIn("el.value=cut.asset_type", page)
@@ -211,6 +217,17 @@ class CutManifestTests(unittest.TestCase):
         self.assertFalse(fact_sensitive)
         self.assertIn("AI 영상", notes[0])
 
+    def test_generated_chart_is_blocked_from_ai_generation(self) -> None:
+        asset_type, media, fact_sensitive, notes = classify_asset_type(
+            prompt="2023년 수출액 4억 달러 상승 그래프",
+            media_hint="사진",
+            narration="검증된 수치를 설명한다",
+        )
+        self.assertEqual(asset_type, AssetType.MANUAL_REQUIRED)
+        self.assertEqual(media, MediaKind.IMAGE)
+        self.assertTrue(fact_sensitive)
+        self.assertIn("생성형 AI", notes[0])
+
     def test_recreated_people_scene_is_not_treated_as_real_portrait(self) -> None:
         asset_type, media, fact_sensitive, notes = classify_asset_type(
             prompt="일본 바이어 미팅 또는 협상 장면 연상 인물 사진",
@@ -259,6 +276,92 @@ class CutManifestTests(unittest.TestCase):
         )
         self.assertTrue(manifest.cuts[1].fact_sensitive)
         self.assertIn("생성 모델 판단", manifest.cuts[0].notes[0])
+        self.assertEqual(
+            manifest.cuts[0].person_depiction,
+            "fictional_person",
+        )
+        self.assertIn(
+            "실존 인물이 아닙니다",
+            manifest.cuts[0].disclosure_text,
+        )
+
+    def test_private_company_representative_uses_fictional_stand_in(self) -> None:
+        guide = {
+            "title": "fixture",
+            "segments": [
+                {
+                    "index": 0,
+                    "duration_sec": 2,
+                    "cuts_suggested": 1,
+                    "narration": "대표가 단호하게 말했다",
+                    "image_suggestions": ["지도표 성경김 대표 인물 사진"],
+                    "media_suggestions": ["사진"],
+                    "asset_type_suggestions": ["real_image"],
+                    "fact_sensitive_suggestions": [True],
+                    "asset_reason_suggestions": ["실존 대표"],
+                }
+            ],
+        }
+
+        cut = build_cut_manifest(guide).cuts[0]
+
+        self.assertEqual(cut.asset_type, AssetType.GENERATED_IMAGE)
+        self.assertFalse(cut.fact_sensitive)
+        self.assertEqual(cut.person_depiction, "fictional_person")
+        self.assertIn("가상의 한국인 기업 대표", cut.prompt)
+        self.assertIn("실존 인물이 아닙니다", cut.disclosure_text)
+
+    def test_private_company_representative_video_keeps_video_with_disclosure(
+        self,
+    ) -> None:
+        guide = {
+            "title": "fixture",
+            "segments": [
+                {
+                    "index": 0,
+                    "duration_sec": 2,
+                    "cuts_suggested": 1,
+                    "narration": "대표가 단호하게 말했다",
+                    "image_suggestions": ["비공인 회사 대표가 말하는 영상"],
+                    "media_suggestions": ["영상"],
+                    "asset_type_suggestions": ["generated_video"],
+                    "person_depiction_suggestions": ["private_person"],
+                    "fact_sensitive_suggestions": [False],
+                    "asset_reason_suggestions": ["비공인 실존 대표 재연"],
+                }
+            ],
+        }
+
+        cut = build_cut_manifest(guide).cuts[0]
+
+        self.assertEqual(cut.asset_type, AssetType.GENERATED_VIDEO)
+        self.assertEqual(cut.media_kind, MediaKind.VIDEO)
+        self.assertEqual(cut.person_depiction, "fictional_person")
+        self.assertIn("실존 인물이 아닙니다", cut.disclosure_text)
+
+    def test_model_generated_numeric_card_is_safety_blocked(self) -> None:
+        guide = {
+            "title": "fixture",
+            "segments": [
+                {
+                    "index": 0,
+                    "duration_sec": 2,
+                    "cuts_suggested": 1,
+                    "narration": "2023년 수출액을 설명한다",
+                    "image_suggestions": ["수출액 4억 달러 수치 강조 그래픽"],
+                    "media_suggestions": ["사진"],
+                    "asset_type_suggestions": ["generated_image"],
+                    "fact_sensitive_suggestions": [False],
+                    "asset_reason_suggestions": ["정보 그래픽"],
+                }
+            ],
+        }
+
+        cut = build_cut_manifest(guide).cuts[0]
+
+        self.assertEqual(cut.asset_type, AssetType.MANUAL_REQUIRED)
+        self.assertTrue(cut.fact_sensitive)
+        self.assertTrue(any("환각 위험" in note for note in cut.notes))
 
     def test_generation_llm_stock_query_is_carried_to_manifest(self) -> None:
         llm = _AssetDirectorLlm()
@@ -365,6 +468,8 @@ class CutManifestTests(unittest.TestCase):
                 store = app.state.personal_automation["store"]
                 manifest = build_cut_manifest(_guide())
                 cut = manifest.cuts[0]
+                cut.person_depiction = "fictional_person"
+                cut.disclosure_text = "실존 인물이 아닙니다."
                 candidate = AssetCandidate(
                     provider="fixture",
                     model="fixture",
@@ -389,6 +494,7 @@ class CutManifestTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(saved.selected_candidate_id)
+        self.assertEqual(saved.disclosure_text, "")
         self.assertEqual(len(saved.candidates), 1)
         self.assertEqual(saved.candidates[0].id, candidate.id)
         self.assertEqual(saved.candidates[0].status, CandidateStatus.READY)

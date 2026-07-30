@@ -14,7 +14,16 @@ from ..domain.assets import (
     MediaKind,
 )
 
-ASSET_CLASSIFIER_VERSION = 4
+ASSET_CLASSIFIER_VERSION = 5
+
+AI_PERSON_IMAGE_DISCLOSURE = (
+    "이 이미지는 이해를 돕기 위한 AI 생성\n"
+    "이미지이며, 실존 인물이 아닙니다."
+)
+AI_PERSON_VIDEO_DISCLOSURE = (
+    "이 영상은 이해를 돕기 위한 AI 생성\n"
+    "영상이며, 실존 인물이 아닙니다."
+)
 
 _FACT_TERMS = (
     "실제",
@@ -145,6 +154,75 @@ _COMMON_KOREAN_STOCK_TERMS = (
     "Han River",
     "Gyeongbokgung",
 )
+_EXACT_RENDER_TERMS = (
+    "그래프",
+    "차트",
+    "도표",
+    "표 그래픽",
+    "인포그래픽",
+    "정보 카드",
+    "정보카드",
+    "수치 카드",
+    "수치 강조",
+    "통계 카드",
+    "데이터 시각화",
+    "발언 자막 카드",
+    "발언 카드",
+    "명언 카드",
+    "뉴스 화면",
+    "기사 화면",
+    "문서 화면",
+    "graph",
+    "chart",
+    "infographic",
+    "data card",
+)
+_GEOGRAPHIC_RENDER_TERMS = (
+    "한반도 지도",
+    "한국 지도",
+    "일본 지도",
+    "세계 지도",
+    "독도",
+    "국경",
+    "영토",
+    "지형도",
+    "map of korea",
+    "map of japan",
+    "world map",
+)
+_NONFACTUAL_MAP_TERMS = (
+    "가상 지도",
+    "판타지 지도",
+    "캐릭터",
+    "의인화",
+    "과장된",
+    "비현실",
+    "상상",
+)
+_PRIVATE_PERSON_TERMS = (
+    "대표 인물",
+    "회사 대표",
+    "기업 대표",
+    "점주",
+    "창업자",
+    "인터뷰이",
+    "관계자",
+    "일반인",
+)
+_PUBLIC_FIGURE_TERMS = (
+    "대통령",
+    "총리",
+    "국회의원",
+    "연예인",
+    "배우",
+    "가수",
+    "아이돌",
+    "유명인",
+    "대기업 총수",
+    "이재용",
+    "일론 머스크",
+    "트럼프",
+)
 
 
 def _pick(items: Any, index: int) -> str:
@@ -172,6 +250,30 @@ def _stock_search_is_unreliable(text: str) -> bool:
     )
 
 
+def generated_visual_requires_exact_source(text: str) -> bool:
+    """True when a generative model could invent factual visual information."""
+
+    return _contains(text, _EXACT_RENDER_TERMS) or (
+        _contains(text, _GEOGRAPHIC_RENDER_TERMS)
+        and not _contains(text, _NONFACTUAL_MAP_TERMS)
+    )
+
+
+def _looks_like_private_person(text: str) -> bool:
+    return _contains(text, _PRIVATE_PERSON_TERMS) and not _contains(
+        text,
+        _PUBLIC_FIGURE_TERMS,
+    )
+
+
+def _fictional_person_prompt() -> str:
+    return (
+        "실존 인물과 닮지 않은 가상의 한국인 기업 대표가 단호하고 "
+        "당당하게 말하는 자연스러운 재연 장면, 실제 인물의 얼굴·외형 "
+        "복제와 이미지 내 글자 금지"
+    )
+
+
 def classify_asset_type(
     *,
     prompt: str,
@@ -195,6 +297,12 @@ def classify_asset_type(
     ):
         is_fact_sensitive = False
     notes: list[str] = []
+    if generated_visual_requires_exact_source(prompt):
+        notes.append(
+            "지도·수치·그래프·정보 카드는 생성형 AI가 사실과 다른 내용을 "
+            "만들 수 있어 원본 자료 또는 사람이 만든 정확한 화면이 필요합니다."
+        )
+        return AssetType.MANUAL_REQUIRED, MediaKind.IMAGE, True, notes
     if _contains(combined, _SCREENSHOT_TERMS):
         notes.append("원본 화면을 직접 캡처해야 하는 컷입니다.")
         return AssetType.SCREENSHOT, MediaKind.IMAGE, is_fact_sensitive, notes
@@ -285,6 +393,19 @@ def build_cut_manifest(
                 )
                 or ""
             ).strip()
+            person_depiction = str(
+                _pick_exact(
+                    segment.get("person_depiction_suggestions"),
+                    cut_index,
+                )
+                or "none"
+            ).strip()
+            disclosure_requested = bool(
+                _pick_exact(
+                    segment.get("ai_disclosure_suggestions"),
+                    cut_index,
+                )
+            )
             try:
                 recommended_type = AssetType(model_asset_type)
             except (TypeError, ValueError):
@@ -312,6 +433,55 @@ def build_cut_manifest(
                         else "컷 문맥과 에셋 확보 가능성을 기준으로 분류했습니다."
                     )
                 ]
+                if (
+                    asset_type
+                    in (
+                        AssetType.REAL_IMAGE,
+                        AssetType.STOCK_IMAGE,
+                        AssetType.GENERATED_IMAGE,
+                        AssetType.GENERATED_VIDEO,
+                    )
+                    and (
+                        person_depiction == "private_person"
+                        or (
+                            person_depiction == "none"
+                            and _looks_like_private_person(prompt)
+                        )
+                    )
+                ):
+                    prompt = _fictional_person_prompt()
+                    if asset_type is AssetType.GENERATED_VIDEO:
+                        media_kind = MediaKind.VIDEO
+                    else:
+                        asset_type = AssetType.GENERATED_IMAGE
+                        media_kind = MediaKind.IMAGE
+                    fact_sensitive = False
+                    person_depiction = "fictional_person"
+                    disclosure_requested = True
+                    notes.extend(
+                        [
+                            "비공인 실존 인물의 원본 사진 대신 특정 인물과 닮지 않은 "
+                            "가상 인물 재연으로 보정했습니다."
+                        ]
+                    )
+                if (
+                    asset_type
+                    in (
+                        AssetType.GENERATED_IMAGE,
+                        AssetType.GENERATED_VIDEO,
+                    )
+                    and generated_visual_requires_exact_source(prompt)
+                ):
+                    asset_type = AssetType.MANUAL_REQUIRED
+                    media_kind = MediaKind.IMAGE
+                    fact_sensitive = True
+                    disclosure_requested = False
+                    notes.extend(
+                        [
+                            "지도·수치·그래프·정보 카드는 생성 결과의 환각 위험 때문에 "
+                            "자동 생성을 차단했습니다."
+                        ]
+                    )
                 if (
                     asset_type is AssetType.STOCK_IMAGE
                     and _stock_search_is_unreliable(prompt)
@@ -364,13 +534,37 @@ def build_cut_manifest(
                     )
                 )
             if cut_id in overrides:
-                asset_type = AssetType(overrides[cut_id])
-                media_kind = (
-                    MediaKind.VIDEO
-                    if asset_type is AssetType.GENERATED_VIDEO
-                    else MediaKind.IMAGE
+                requested_type = AssetType(overrides[cut_id])
+                if fact_sensitive and requested_type in (
+                    AssetType.GENERATED_IMAGE,
+                    AssetType.GENERATED_VIDEO,
+                ):
+                    notes.append(
+                        "사실성 보호 대상이라 생성형 에셋 유형 변경을 적용하지 않았습니다."
+                    )
+                else:
+                    asset_type = requested_type
+                    media_kind = (
+                        MediaKind.VIDEO
+                        if asset_type is AssetType.GENERATED_VIDEO
+                        else MediaKind.IMAGE
+                    )
+                    notes.append("사용자가 에셋 유형을 변경했습니다.")
+            disclosure_text = ""
+            if (
+                disclosure_requested
+                and person_depiction == "fictional_person"
+                and asset_type
+                in (
+                    AssetType.GENERATED_IMAGE,
+                    AssetType.GENERATED_VIDEO,
                 )
-                notes.append("사용자가 에셋 유형을 변경했습니다.")
+            ):
+                disclosure_text = (
+                    AI_PERSON_VIDEO_DISCLOSURE
+                    if asset_type is AssetType.GENERATED_VIDEO
+                    else AI_PERSON_IMAGE_DISCLOSURE
+                )
             paid = asset_type in (
                 AssetType.GENERATED_IMAGE,
                 AssetType.GENERATED_VIDEO,
@@ -394,6 +588,8 @@ def build_cut_manifest(
                         if asset_type is AssetType.STOCK_IMAGE
                         else ""
                     ),
+                    person_depiction=person_depiction,
+                    disclosure_text=disclosure_text,
                     fact_sensitive=fact_sensitive,
                     approval_status=(
                         ApprovalStatus.PENDING

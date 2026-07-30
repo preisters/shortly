@@ -43,13 +43,29 @@ def _image_generation_prompt(
     )
     return (
         f"{prompt.strip()}\n\n"
-        "Composition requirements: create a vertical 2:3 image at 1024x1536. "
-        "Keep the main subject centered with comfortable safe margins on every side "
-        "so it can be placed inside a 9:16 Shorts frame without cutting off important "
-        f"details. {person_requirement}"
+        "Composition requirements: create one coherent, cinematic editorial still, "
+        "not a poster, advertisement, collage, infographic, or card-news design. "
+        "Prefer believable documentary realism, natural lighting, physically "
+        "consistent hands and objects, and one immediately readable visual action. "
+        "Create a vertical 2:3 image at 1024x1536. Keep the main subject in the "
+        "middle-to-lower area with comfortable safe margins on every side and leave "
+        "the upper quarter visually calm for Shorts captions. Do not crop faces, "
+        "hands, products, or the object that explains the scene. "
+        f"{person_requirement}"
         "Do not add captions, quotes, letters, numbers, logos, watermarks, borders, "
         "UI elements, data cards, charts, graphs, tables, documents, or geographic "
         "maps. The CapCut project adds all verified text separately."
+    )
+
+
+def _video_generation_prompt(prompt: str) -> str:
+    return (
+        f"{prompt.strip()}\n\n"
+        "Create a short vertical 9:16 documentary-style B-roll shot with one clear "
+        "action, stable subject identity, realistic motion and lighting, and no "
+        "scene change. Keep the key action in the middle-to-lower safe area and the "
+        "upper quarter calm for captions. Do not add text, numbers, logos, "
+        "watermarks, UI, charts, maps, or card-news graphics."
     )
 
 
@@ -231,7 +247,7 @@ class AssetJobExecutor:
 
     def _run_video(self, job: dict) -> dict:
         request = VideoGenerationRequest(
-            prompt=job["request"]["prompt"],
+            prompt=_video_generation_prompt(job["request"]["prompt"]),
             model=job["model"],
             idempotency_key=job["idempotency_key"],
         )

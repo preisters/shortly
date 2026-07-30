@@ -8,6 +8,7 @@ from shortly.apps.personal.assets.fake import FakeImageProvider
 from shortly.apps.personal.automation.executor import (
     AssetJobExecutor,
     _image_generation_prompt,
+    _video_generation_prompt,
 )
 from shortly.apps.personal.automation.settings import PersonalAutomationSettings
 from shortly.apps.personal.automation.store import (
@@ -117,6 +118,14 @@ class AssetJobExecutorTests(unittest.TestCase):
 
         self.assertIn("fictional adult", prompt)
         self.assertIn("does not resemble a specific real person", prompt)
+
+    def test_video_prompt_requests_single_caption_safe_shot(self) -> None:
+        prompt = _video_generation_prompt("수출 상자를 옮기는 장면")
+
+        self.assertIn("vertical 9:16", prompt)
+        self.assertIn("one clear action", prompt)
+        self.assertIn("upper quarter calm", prompt)
+        self.assertIn("Do not add text", prompt)
 
     def test_exact_data_visual_cannot_be_queued_for_generation(self) -> None:
         cut = self.manifest.cuts[0]

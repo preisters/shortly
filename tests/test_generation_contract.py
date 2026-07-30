@@ -9,13 +9,38 @@ from support import load_fixture
 
 from shortly.generate.guide import build_guide
 from shortly.generate.script_gen import (
+    _style_context,
+    analyze_story_flow,
     apply_revision_scope,
     extract_subject_anchors,
     generate_script,
+    polish_story_flow,
     script_preserves_subject,
 )
 from shortly.llm.base import LLMClient
 from shortly.service import _revision_lineage_context
+
+
+class _FlowPolishLlm(LLMClient):
+    available = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete_json(self, *args, **kwargs):
+        self.calls += 1
+        return {
+            "title": "일본 시장 통째로 버린 김",
+            "hook": "일본 시장 통째로 버린 김",
+            "segments": [
+                {"index": 1, "text": "강한 훅", "intent": "hook"},
+                {"index": 2, "text": "주인공 공개", "intent": "reveal"},
+                {"index": 3, "text": "갈등 발생", "intent": "conflict"},
+                {"index": 4, "text": "결정적인 선택", "intent": "choice"},
+                {"index": 5, "text": "선택의 대가", "intent": "cost"},
+                {"index": 6, "text": "해외 성과로 훅 회수", "intent": "payoff"},
+            ],
+        }
 
 
 class GenerationContractTests(unittest.TestCase):
@@ -227,6 +252,91 @@ class GenerationContractTests(unittest.TestCase):
         )
         self.assertEqual(context["root_input_type"], "topic")
         self.assertEqual(len(context["research_results"]), 2)
+
+    def test_style_context_does_not_promote_noisy_run_on_rules(self) -> None:
+        profile = {
+            "stats": {},
+            "style_summary": (
+                "빠른 음식 쇼츠다. 연결어를 활용해 긴 호흡의 문장을 "
+                "쉼표로 이어간다."
+            ),
+            "recipe": {
+                "voice": (
+                    "문장을 딱 끊지 않고 쉼표로 이어간다. "
+                    "사실, 하지만 같은 연결어를 반복한다."
+                ),
+                "do": [
+                    "사실, 하지만, 그건 바로 등 연결어로 문장 전환",
+                    "강한 훅 사용",
+                ],
+                "avoid": ["문장을 딱 떨어지게 끝맺기"],
+            },
+        }
+
+        context = _style_context(profile)
+
+        self.assertNotIn("문장을 딱 끊지", context)
+        self.assertNotIn(
+            "사실, 하지만, 그건 바로 등 연결어로 문장 전환",
+            context,
+        )
+        self.assertNotIn("문장을 딱 떨어지게 끝맺기", context)
+        self.assertIn("같은 사실 반복", context)
+        self.assertIn("정보 공개 순서", context)
+
+    def test_flow_analysis_flags_numeric_dump_in_ending(self) -> None:
+        script = {
+            "title": "fixture",
+            "hook": "fixture",
+            "segments": [
+                {"index": 1, "text": "강한 훅"},
+                {"index": 2, "text": "주인공 공개"},
+                {"index": 3, "text": "갈등 발생"},
+                {"index": 4, "text": "결정적인 선택"},
+                {"index": 5, "text": "선택의 대가"},
+                {
+                    "index": 6,
+                    "text": (
+                        "근데 2024년 보도 기준으로 수출 비중이 1%에서 "
+                        "40%까지 커지고 수출 2위에 올랐고 국내 품절까지 났다고"
+                    ),
+                },
+            ],
+        }
+
+        issues = analyze_story_flow(script)
+
+        self.assertTrue(
+            any("정보가 과도하게 몰림" in issue for issue in issues)
+        )
+
+    def test_flow_polish_runs_only_for_detected_structure_problem(self) -> None:
+        llm = _FlowPolishLlm()
+        script = {
+            "title": "일본 시장 통째로 버린 김",
+            "hook": "일본 시장 통째로 버린 김",
+            "segments": [
+                {"index": 1, "text": "강한 훅"},
+                {"index": 2, "text": "주인공 공개"},
+                {"index": 3, "text": "갈등 발생"},
+                {"index": 4, "text": "결정적인 선택"},
+                {"index": 5, "text": "선택의 대가"},
+                {
+                    "index": 6,
+                    "text": (
+                        "2024년 기준 수출 비중 1%에서 40%, 수출 2위, "
+                        "국내 품절까지 한꺼번에 설명하는 마무리"
+                    ),
+                },
+            ],
+            "_source": "llm",
+        }
+
+        polished = polish_story_flow(llm, {}, script)
+
+        self.assertEqual(llm.calls, 1)
+        self.assertTrue(polished["_source"].endswith("+flow"))
+        self.assertEqual(analyze_story_flow(polished), [])
 
 
 if __name__ == "__main__":

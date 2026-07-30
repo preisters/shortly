@@ -125,11 +125,6 @@ class FactSafetyTests(unittest.TestCase):
             "queries": ["성경김 독도 일본 수출"],
             "results": [
                 {
-                    "title": "독도 표기 고수한 성경김",
-                    "snippet": "지도표 성경김은 포장지 표기를 유지했다.",
-                    "url": "https://example.test/article",
-                },
-                {
                     "title": "독도 못 빼 일본 포기한 쌀과자",
                     "snippet": "전남 장성 유아용 쌀과자 업체 이야기다.",
                     "url": "https://example.test/rice-snack",
@@ -145,6 +140,13 @@ class FactSafetyTests(unittest.TestCase):
                 "성경김 독도 일본 수출",
                 llm=_ResearchLlm(),
                 subject_anchors=["성경김"],
+                seed_results=[
+                    {
+                        "title": "독도 표기 고수한 성경김",
+                        "snippet": "지도표 성경김은 해외에서도 판매된다.",
+                        "url": "https://example.test/article",
+                    }
+                ],
             )
 
         self.assertEqual(len(research["results"]), 1)

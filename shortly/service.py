@@ -22,6 +22,7 @@ from .generate.image_reco import recommend_cuts
 from .generate.research import research_topic
 from .generate.factcheck import factcheck_script
 from .generate.script_gen import (
+    apply_revision_scope,
     extract_subject_anchors,
     generate_script,
     revise_script,
@@ -625,6 +626,86 @@ def _unique_output_dir(out_root: Path, base_slug: str) -> Path:
     return candidate
 
 
+def _revision_lineage_context(
+    target: Path,
+    *,
+    max_depth: int = 8,
+) -> Dict:
+    """Collect root request metadata and prior evidence across revisions."""
+
+    out_root = target.parent.resolve()
+    current = target.resolve()
+    visited = set()
+    root_input_text = ""
+    root_input_type = ""
+    subject_anchors: List[str] = []
+    research_results: List[Dict] = []
+    seen_results = set()
+
+    for _ in range(max_depth):
+        current_key = str(current).casefold()
+        if current_key in visited or current.parent != out_root:
+            break
+        visited.add(current_key)
+        request = read_json(current / "request.json", default={}) or {}
+        research = read_json(current / "research.json", default={}) or {}
+        factcheck = read_json(current / "factcheck.json", default={}) or {}
+
+        stored_anchors = request.get("subject_anchors")
+        if not subject_anchors and isinstance(stored_anchors, list):
+            subject_anchors = [
+                str(value).strip()
+                for value in stored_anchors
+                if str(value).strip()
+            ]
+
+        input_type = str(request.get("input_type") or "").strip()
+        if input_type in ("topic", "script"):
+            root_input_text = str(request.get("input_text") or "").strip()
+            root_input_type = input_type
+        original_type = str(
+            request.get("original_input_type") or ""
+        ).strip()
+        original_text = str(
+            request.get("original_input_text") or ""
+        ).strip()
+        if original_type in ("topic", "script") and original_text:
+            root_input_text = original_text
+            root_input_type = original_type
+
+        for row in [
+            *(research.get("results") or []),
+            *(factcheck.get("extra_results") or []),
+        ]:
+            if not isinstance(row, dict):
+                continue
+            key = (
+                str(row.get("url") or "").split("?", 1)[0]
+                or str(row.get("title") or "").strip().casefold()
+            )
+            if not key or key in seen_results:
+                continue
+            seen_results.add(key)
+            research_results.append(row)
+
+        source_name = str(
+            request.get("source_guide_name") or ""
+        ).strip()
+        if not source_name:
+            break
+        next_target = (out_root / source_name).resolve()
+        if next_target.parent != out_root or not next_target.is_dir():
+            break
+        current = next_target
+
+    return {
+        "root_input_text": root_input_text,
+        "root_input_type": root_input_type,
+        "subject_anchors": subject_anchors,
+        "research_results": research_results,
+    }
+
+
 def revise_guide(channel_input: str, name: str, instruction: str,
                  settings: Optional[Settings] = None,
                  progress: Progress = _noop) -> Dict:
@@ -646,17 +727,23 @@ def revise_guide(channel_input: str, name: str, instruction: str,
         return {"ok": False,
                 "reason": "원본 대본(script.json)을 읽을 수 없어 수정할 수 없습니다."}
     original_request = read_json(target / "request.json", default={}) or {}
+    lineage = _revision_lineage_context(target)
     root_input_text = str(
-        original_request.get("original_input_text")
+        lineage.get("root_input_text")
+        or original_request.get("original_input_text")
         or original_request.get("input_text")
         or ""
     ).strip()
     root_input_type = str(
-        original_request.get("original_input_type")
+        lineage.get("root_input_type")
+        or original_request.get("original_input_type")
         or original_request.get("input_type")
         or ""
     ).strip()
-    stored_subject_anchors = original_request.get("subject_anchors")
+    stored_subject_anchors = (
+        lineage.get("subject_anchors")
+        or original_request.get("subject_anchors")
+    )
     subject_anchors = (
         [
             str(value).strip()
@@ -702,6 +789,7 @@ def revise_guide(channel_input: str, name: str, instruction: str,
             max_results=getattr(settings, "research_max_results", 8),
             max_queries=getattr(settings, "research_max_queries", 4),
             subject_anchors=subject_anchors,
+            seed_results=lineage.get("research_results") or [],
         )
         n = len((research or {}).get("results") or [])
         progress(f"웹 조사 완료 ({n}건)", None, None)
@@ -741,7 +829,13 @@ def revise_guide(channel_input: str, name: str, instruction: str,
             instruction,
         ] if x).strip()
         fc = factcheck_script(
-            llm, script, research=research, topic=seed, force=True)
+            llm,
+            script,
+            research=research,
+            topic=seed,
+            force=True,
+            revision_instruction=instruction,
+        )
         factcheck_meta = {
             "changed": fc.get("changed"),
             "issues": fc.get("issues") or [],
@@ -750,8 +844,16 @@ def revise_guide(channel_input: str, name: str, instruction: str,
             "extra_results": fc.get("extra_results") or [],
         }
         if fc.get("changed") and fc.get("script"):
-            if script_preserves_subject(fc["script"], subject_anchors):
-                script = fc["script"]
+            scoped_factcheck_script = apply_revision_scope(
+                script,
+                fc["script"],
+                instruction,
+            )
+            if script_preserves_subject(
+                scoped_factcheck_script,
+                subject_anchors,
+            ):
+                script = scoped_factcheck_script
                 progress(
                     f"팩트체크 수정 반영 ({len(factcheck_meta['fixes'])}건)",
                     None, None)

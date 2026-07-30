@@ -547,6 +547,7 @@ def research_topic(
     max_results: int = 8,
     max_queries: int = 4,
     subject_anchors: Optional[List[str]] = None,
+    seed_results: Optional[List[Dict]] = None,
 ) -> Dict:
     """주제 웹 조사 + (가능하면) LLM 요약. 실패해도 빈 구조 반환."""
     topic = (topic or "").strip()
@@ -560,6 +561,21 @@ def research_topic(
         }
     log.info("웹 조사 시작: %s", topic[:60])
     raw = collect_raw(topic, max_results=max_results, max_queries=max_queries)
+    if seed_results:
+        combined_results = []
+        seen = set()
+        for row in [*seed_results, *(raw.get("results") or [])]:
+            if not isinstance(row, dict):
+                continue
+            key = _canonical_source_url(str(row.get("url") or "")) or str(
+                row.get("title") or ""
+            ).strip().casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            combined_results.append(row)
+        raw["results"] = combined_results
+        raw["seeded_results"] = len(seed_results)
     anchors = [
         re.sub(r"\s+", "", str(value or "")).casefold()
         for value in subject_anchors or []
@@ -581,12 +597,15 @@ def research_topic(
             "anchors": list(subject_anchors or []),
             "excluded_results": len(original_results) - len(filtered_results),
         }
+        raw["results"] = filtered_results[: max(8, max_results * 2)]
         log.info(
             "웹 조사 주체 필터: anchors=%s kept=%d excluded=%d",
             subject_anchors,
-            len(filtered_results),
+            len(raw["results"]),
             len(original_results) - len(filtered_results),
         )
+    elif len(raw.get("results") or []) > max(8, max_results * 2):
+        raw["results"] = list(raw["results"])[: max(8, max_results * 2)]
     log.info("웹 조사 결과 %d건 (backend=%s)",
              len(raw.get("results") or []), raw.get("backend"))
     return distill_research(llm, topic, raw)

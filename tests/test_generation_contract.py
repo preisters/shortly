@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from support import load_fixture
 
 from shortly.generate.guide import build_guide
 from shortly.generate.script_gen import (
+    apply_revision_scope,
     extract_subject_anchors,
     generate_script,
     script_preserves_subject,
 )
 from shortly.llm.base import LLMClient
+from shortly.service import _revision_lineage_context
 
 
 class GenerationContractTests(unittest.TestCase):
@@ -103,6 +108,125 @@ class GenerationContractTests(unittest.TestCase):
         self.assertIn("성경김", anchors)
         self.assertTrue(script_preserves_subject(original, anchors))
         self.assertFalse(script_preserves_subject(substituted, anchors))
+
+    def test_closing_only_revision_preserves_title_and_previous_segments(
+        self,
+    ) -> None:
+        original = {
+            "title": "일본 시장 통째로 버린 김",
+            "hook": "일본 시장 통째로 버린 김",
+            "segments": [
+                {"index": 1, "text": "첫 문장"},
+                {"index": 2, "text": "기존 마무리"},
+            ],
+            "_source": "llm",
+        }
+        candidate = {
+            "title": "LLM이 바꾼 제목",
+            "hook": "LLM이 바꾼 제목",
+            "segments": [
+                {"index": 1, "text": "LLM이 바꾼 첫 문장"},
+                {"index": 2, "text": "해외에서 잘 팔리는 마무리"},
+            ],
+            "_source": "llm",
+        }
+
+        revised = apply_revision_scope(
+            original,
+            candidate,
+            "마무리만 해외에서 잘나가는 내용으로 변경해줘",
+        )
+
+        self.assertEqual(revised["title"], original["title"])
+        self.assertEqual(revised["hook"], original["hook"])
+        self.assertEqual(revised["segments"][0]["text"], "첫 문장")
+        self.assertEqual(
+            revised["segments"][1]["text"],
+            "해외에서 잘 팔리는 마무리",
+        )
+
+    def test_revision_lineage_recovers_root_topic_and_prior_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_root = Path(temp_dir)
+            initial = out_root / "initial"
+            first_revision = out_root / "first"
+            latest = out_root / "latest"
+            for path in (initial, first_revision, latest):
+                path.mkdir()
+
+            (initial / "request.json").write_text(
+                json.dumps(
+                    {
+                        "input_type": "topic",
+                        "input_text": "성경김의 일본 수출 이야기",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (initial / "research.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "title": "성경김 해외 수출",
+                                "url": "https://example.test/overseas",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (first_revision / "request.json").write_text(
+                json.dumps(
+                    {
+                        "input_type": "revision",
+                        "input_text": "후반부 수정",
+                        "source_guide_name": "initial",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (first_revision / "factcheck.json").write_text(
+                json.dumps(
+                    {
+                        "extra_results": [
+                            {
+                                "title": "성경김 수출 비중",
+                                "url": "https://example.test/share",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (latest / "request.json").write_text(
+                json.dumps(
+                    {
+                        "input_type": "revision",
+                        "input_text": "마무리만 수정",
+                        "source_guide_name": "first",
+                        "original_input_text": "직전 수정 요청",
+                        "original_input_type": "revision",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            context = _revision_lineage_context(latest)
+
+        self.assertEqual(
+            context["root_input_text"],
+            "성경김의 일본 수출 이야기",
+        )
+        self.assertEqual(context["root_input_type"], "topic")
+        self.assertEqual(len(context["research_results"]), 2)
 
 
 if __name__ == "__main__":

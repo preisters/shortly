@@ -329,6 +329,90 @@ def script_preserves_subject(script: Dict, subject_anchors: List[str]) -> bool:
     return any(anchor in compact for anchor in anchors)
 
 
+def apply_revision_scope(
+    original_script: Dict,
+    candidate_script: Dict,
+    instruction: str,
+) -> Dict:
+    """Deterministically preserve sections outside a narrowly requested edit."""
+
+    request = re.sub(r"\s+", "", instruction or "")
+    closing_only = any(
+        marker in request
+        for marker in (
+            "마무리만",
+            "마지막만",
+            "마지막부분만",
+            "엔딩만",
+            "끝부분만",
+        )
+    )
+    latter_only = not closing_only and any(
+        marker in request
+        for marker in (
+            "후반부만",
+            "후반부를",
+            "후반부가",
+            "후반부분만",
+        )
+    )
+    title_only = any(
+        marker in request
+        for marker in ("제목만", "타이틀만", "훅만")
+    )
+    if not (closing_only or latter_only or title_only):
+        return candidate_script
+
+    merged = copy.deepcopy(original_script)
+    original_segments = [
+        segment
+        for segment in original_script.get("segments") or []
+        if isinstance(segment, dict)
+    ]
+    candidate_segments = [
+        segment
+        for segment in candidate_script.get("segments") or []
+        if isinstance(segment, dict) and str(segment.get("text") or "").strip()
+    ]
+
+    if title_only:
+        line = _prefer_hook_line(
+            str(candidate_script.get("title") or ""),
+            str(candidate_script.get("hook") or ""),
+        )
+        if line:
+            merged["title"] = line
+            merged["hook"] = line
+    elif original_segments and candidate_segments:
+        if closing_only:
+            replacement = copy.deepcopy(candidate_segments[-1])
+            replacement["index"] = original_segments[-1].get(
+                "index",
+                len(original_segments),
+            )
+            merged["segments"] = [
+                *copy.deepcopy(original_segments[:-1]),
+                replacement,
+            ]
+        else:
+            keep_count = max(1, len(original_segments) // 2)
+            replacement_count = len(original_segments) - keep_count
+            tail = copy.deepcopy(candidate_segments[-replacement_count:])
+            for offset, segment in enumerate(tail, keep_count):
+                segment["index"] = original_segments[offset].get(
+                    "index",
+                    offset,
+                )
+            merged["segments"] = [
+                *copy.deepcopy(original_segments[:keep_count]),
+                *tail,
+            ]
+    merged["_source"] = str(
+        candidate_script.get("_source") or "llm"
+    )
+    return merged
+
+
 def generate_script(llm: LLMClient, profile: Dict, text: str, is_script: bool = False,
                     research: Optional[Dict] = None) -> Dict:
     """채널 스타일을 반영한 대본을 생성/보정합니다."""
@@ -406,7 +490,11 @@ def revise_script(
     try:
         data = llm.complete_json(_SYSTEM_PROMPT, user, temperature=0.85, max_tokens=7000)
         if isinstance(data, dict) and data.get("segments"):
-            return _finalize_llm_script(data)
+            return apply_revision_scope(
+                original_script,
+                _finalize_llm_script(data),
+                instruction,
+            )
         log.info("대본 수정 LLM 응답에 segments 가 없음")
     except LLMError as exc:
         log.info("대본 수정 LLM 실패: %s", exc)

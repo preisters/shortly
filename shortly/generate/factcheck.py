@@ -218,6 +218,7 @@ def factcheck_script(
     topic: str = "",
     *,
     force: bool = False,
+    revision_instruction: str = "",
 ) -> Dict:
     """대본을 조사 메모·추가 시점 검색으로 재검증하고 필요 시 수정한다.
 
@@ -281,7 +282,11 @@ def factcheck_script(
         "'몇 년 보도 기준'처럼 한계를 밝히고, 짧게 정확히 쓸 수 없으면 수치를 삭제한다.\n"
         "6) 인수·계약·협상은 기사 본문의 최종 상태까지 확인한다. 제목이 검토설이어도 "
         "본문에 당사자의 부인이나 결렬이 있으면 그 상태를 반영한다.\n"
-        "7) 문제 없으면 changed=false, script는 원문 그대로.\n"
+        "7) 대본 수정 요청이 함께 제공되면 그 요청의 방향과 수정 범위를 보존한다. "
+        "예를 들어 '마무리만'이면 다른 세그먼트·제목을 바꾸지 않는다. 요청한 세부 수치가 "
+        "불확실하면 검증된 같은 방향의 사실로 완화하되, 사용자가 제거하라고 한 문장이나 "
+        "전혀 다른 결말을 되살리지 않는다.\n"
+        "8) 문제 없으면 changed=false, script는 원문 그대로.\n"
         "JSON만 출력."
     )
     schema = (
@@ -293,6 +298,8 @@ def factcheck_script(
     )
     user = (
         f"[주제/입력]\n{(topic or '')[:1500]}\n\n"
+        f"[이번 대본 수정 요청]\n"
+        f"{(revision_instruction or '(신규 생성 — 수정 요청 없음)')[:1500]}\n\n"
         f"[생성 대본 JSON]\n{json.dumps(script, ensure_ascii=False)[:3500]}\n\n"
         f"[조사 메모·스니펫]\n{_format_research(research)[:4500]}\n\n"
         f"[시점·수치 추가 검색]\n{extra_txt[:2500] or '(없음)'}\n\n"

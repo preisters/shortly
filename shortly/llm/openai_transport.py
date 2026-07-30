@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
+from typing import Any
 
-from .base import LLMClient, LLMError, LLMUnavailable, strip_think
+from .base import LLMClient, LLMError, LLMUnavailable, parse_json_loose, strip_think
 
 
 class OpenAICompatibleClient(LLMClient):
@@ -70,9 +71,55 @@ class OpenAICompatibleClient(LLMClient):
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
-            return strip_think(response.choices[0].message.content or "").strip()
+            message = response.choices[0].message
+            raw = message.content or getattr(message, "reasoning_content", "") or ""
+            return strip_think(raw).strip()
         except Exception as exc:  # noqa: BLE001
             raise LLMError(f"OpenAI 호출 실패: {exc}") from exc
+
+    def complete_json(
+        self,
+        system: str,
+        user: str,
+        temperature: float = 0.4,
+        max_tokens: int = 4096,
+    ) -> Any:
+        if not self._base_url:
+            return super().complete_json(
+                system,
+                user,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        client = self._ensure()
+        if self._no_think:
+            system = (system or "") + " /no_think"
+        try:
+            response = client.chat.completions.create(
+                model=self.text_model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "response",
+                        "strict": False,
+                        "schema": {},
+                    },
+                },
+            )
+            message = response.choices[0].message
+            raw = message.content or getattr(message, "reasoning_content", "") or ""
+            raw = strip_think(raw).strip()
+            return parse_json_loose(raw)
+        except LLMError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise LLMError(f"OpenAI-compatible JSON request failed: {exc}") from exc
 
     def describe_image(
         self,
@@ -105,6 +152,8 @@ class OpenAICompatibleClient(LLMClient):
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
-            return strip_think(response.choices[0].message.content or "").strip()
+            message = response.choices[0].message
+            raw = message.content or getattr(message, "reasoning_content", "") or ""
+            return strip_think(raw).strip()
         except Exception as exc:  # noqa: BLE001
             raise LLMError(f"OpenAI 비전 호출 실패: {exc}") from exc

@@ -129,6 +129,26 @@ def render_guide_markdown(guide: Dict) -> str:
             lines.append(f"- 이미지 추천: {', '.join(s['image_suggestions'])}")
         if s.get("media_suggestions"):
             lines.append(f"- 매체: {', '.join(s['media_suggestions'])}")
+        if s.get("asset_type_suggestions"):
+            lines.append(
+                f"- 에셋 유형: {', '.join(s['asset_type_suggestions'])}"
+            )
+        if s.get("asset_reason_suggestions"):
+            lines.append(
+                f"- 에셋 판단: {' / '.join(s['asset_reason_suggestions'])}"
+            )
+        if s.get("stock_query_suggestions"):
+            queries = [
+                item
+                for item in s["stock_query_suggestions"]
+                if str(item).strip()
+            ]
+            if queries:
+                lines.append(f"- 스톡 검색어: {', '.join(queries)}")
+        if s.get("ai_disclosure_suggestions") and any(
+            s["ai_disclosure_suggestions"]
+        ):
+            lines.append("- 가상 인물 고지: 해당 생성 컷에 자동 표시")
         if s.get("effect_suggestions"):
             lines.append(f"- 효과 추천: {', '.join(s['effect_suggestions'])}")
     g = guide.get("global_notes", {})

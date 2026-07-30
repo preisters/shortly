@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from support import isolated_shortly_env
@@ -46,6 +48,45 @@ class _FakeService:
     "FastAPI runtime dependencies are unavailable",
 )
 class AppCompositionTests(unittest.TestCase):
+    def test_legacy_web_command_preserves_data_and_adds_asset_page(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            legacy_data = Path(temporary) / "legacy-data"
+            legacy_artifacts = Path(temporary) / "legacy-artifacts"
+            with isolated_shortly_env(
+                SHORTLY_DATA_DIR=str(legacy_data),
+                SHORTLY_ARTIFACT_DIR=str(legacy_artifacts),
+            ):
+                legacy_settings = Settings.load()
+                runtime_app = legacy_app._create_runtime_app(legacy_settings)
+                automation = runtime_app.state.personal_automation["settings"]
+                configured_product = os.environ.get("SHORTLY_PRODUCT")
+                with TestClient(
+                    runtime_app,
+                    client=("127.0.0.1", 50000),
+                ) as client:
+                    response = client.get(
+                        "/personal/assets",
+                        params={
+                            "channel": "@fixture",
+                            "name": "saved-guide",
+                        },
+                    )
+
+        self.assertIs(legacy_settings.product, ProductKind.LEGACY)
+        self.assertIsNone(configured_product)
+        self.assertEqual(legacy_settings.data_dir, legacy_data)
+        self.assertEqual(automation.state_dir, legacy_data / "automation")
+        self.assertEqual(automation.artifact_dir, legacy_artifacts)
+
+        routes = set(route_manifest(runtime_app))
+        self.assertEqual(runtime_app.state.product, ProductKind.PERSONAL.value)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(("GET", "/personal/assets"), routes)
+        self.assertIn(
+            ("POST", "/api/personal/manifests/from-guide"),
+            routes,
+        )
+
     def test_product_factories_share_legacy_routes_and_personal_adds_automation(self) -> None:
         with isolated_shortly_env():
             team = create_team_app()
@@ -61,8 +102,37 @@ class AppCompositionTests(unittest.TestCase):
         personal_routes = set(route_manifest(personal))
         self.assertTrue(legacy_routes.issubset(personal_routes))
         self.assertIn(("POST", "/api/personal/manifests"), personal_routes)
+        self.assertIn(
+            ("POST", "/api/personal/manifests/from-guide"),
+            personal_routes,
+        )
+        self.assertIn(
+            (
+                "GET",
+                "/api/personal/manifests/{manifest_id}/cuts/{cut_id}/stock-search",
+            ),
+            personal_routes,
+        )
+        self.assertIn(
+            (
+                "POST",
+                "/api/personal/manifests/{manifest_id}/cuts/{cut_id}/stock-select",
+            ),
+            personal_routes,
+        )
+        self.assertIn(
+            (
+                "GET",
+                "/api/personal/manifests/{manifest_id}/cuts/{cut_id}/preview",
+            ),
+            personal_routes,
+        )
         self.assertNotIn(
             ("POST", "/api/personal/manifests"),
+            set(route_manifest(team)),
+        )
+        self.assertNotIn(
+            ("POST", "/api/personal/manifests/from-guide"),
             set(route_manifest(team)),
         )
         self.assertNotIn(("GET", "/api/local-models"), route_manifest(team))

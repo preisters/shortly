@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from ..config import get_settings, save_settings
 from .. import service as default_service
 from ..llm import get_llm
+from ..product_profile import ProductKind
 from .assets import render_index
 from .composition import ServiceProxy
 
@@ -497,10 +498,28 @@ def _lan_ips() -> list:
     return sorted(ips)
 
 
+def _create_runtime_app(settings):
+    """Select the concrete product app for the legacy-compatible web command."""
+
+    if settings.portable or settings.product is ProductKind.TEAM:
+        from ..apps.team.api import create_app
+        return create_app()
+
+    from ..apps.personal.api import create_app
+
+    if settings.product is ProductKind.LEGACY:
+        return create_app(
+            base_settings=settings,
+            configure_environment=False,
+        )
+    return create_app()
+
+
 def run(host: str = "0.0.0.0", port: int = 8756) -> None:
     import uvicorn
 
     settings = get_settings()
+    runtime_app = _create_runtime_app(settings)
     print("=" * 56)
     print(" shortly 웹 UI 시작")
     print(f"  - 이 PC:        http://localhost:{port}")
@@ -522,4 +541,4 @@ def run(host: str = "0.0.0.0", port: int = 8756) -> None:
     if settings.portable:
         print("  * 모드: PORTABLE (학습=Sonnet 5, 생성=Opus 4.8, 효과음 OFF)")
     print("=" * 56, flush=True)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(runtime_app, host=host, port=port, log_level="info")

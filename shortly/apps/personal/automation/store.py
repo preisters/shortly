@@ -165,6 +165,27 @@ class AutomationStore:
             for row in rows
         ]
 
+    def find_manifest_by_source_hash(
+        self, source_guide_hash: str
+    ) -> Optional[CutManifest]:
+        """Return the most recently updated manifest for an identical guide."""
+
+        if not source_guide_hash:
+            return None
+        with self._connection() as db:
+            rows = db.execute(
+                """
+                SELECT document_json
+                FROM manifests
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+        for row in rows:
+            value = json.loads(row["document_json"])
+            if value.get("source_guide_hash") == source_guide_hash:
+                return CutManifest.from_dict(value)
+        return None
+
     def create_job(
         self,
         *,

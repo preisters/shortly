@@ -43,7 +43,7 @@ pip install -r requirements.txt
 제품별 실행 엔트리포인트:
 
 ```bash
-# 기존 호환 실행(legacy)
+# 기존 호환 명령(기존 데이터 경로 + personal 자동화 라우트)
 python -m shortly web
 
 # 개인 자동화판 로컬 웹 앱
@@ -52,7 +52,7 @@ python -m shortly.apps.personal.launcher
 # 팀판은 portable 패키지의 기존 시작 파일이 team composition root를 사용
 ```
 
-팀판의 LLM 레지스트리는 현재 Anthropic만 등록합니다. 개인판과 legacy 실행은
+팀판의 LLM 레지스트리는 현재 Anthropic만 등록합니다. 개인판과 호환 실행은
 Gemini, OpenAI, Anthropic 및 OpenAI-compatible 로컬 서버 연결을 유지합니다.
 팀 포터블 빌드는 개인판 앱과 로컬 LLM 어댑터를 산출물에서 제외합니다.
 
@@ -71,6 +71,12 @@ python -m shortly.apps.personal.launcher
 세 단계로 분리되며 승인 토큰은 한 번만 사용할 수 있습니다. 생성물과 사용량 DB는
 개인판 데이터·결과물 폴더에 저장됩니다.
 
+스톡 이미지 컷은 Openverse를 기본으로 검색합니다. `.env`에
+`PIXABAY_API_KEY`와 `PEXELS_API_KEY`를 설정하고 서버를 다시 시작하면
+Pixabay와 Pexels도 함께 검색할 수 있습니다. 검색 결과 카드에는 사이트와
+라이선스가 표시되며, 이미지를 선택하지 않은 스톡 컷이 있으면 CapCut 내보내기가
+차단됩니다.
+
 실제 API 가격은 바뀔 수 있으므로 생성 전 공급자 대시보드의 현재 가격을 확인하세요.
 영상 공급자인 Gemini Omni Flash는 현재 preview이므로 중요한 작업은 결과와 과금을
 별도로 확인해야 합니다.
@@ -83,6 +89,11 @@ python -m shortly.apps.personal.launcher
 - `SHORTLY_TEXT_MODEL`: 텍스트 모델 (예: Ollama `qwen3.6:27b`)
 - `SHORTLY_VISION_MODEL`: 비전 모델 (예: Ollama `qwen3-vl:8b-instruct-q8_0`)
 - `SHORTLY_LOCAL_NO_THINK`: Qwen3 등 reasoning 모델의 thinking 자동 끔 (기본 `1`)
+- `SHORTLY_LOCAL_AUTO_UNLOAD`: 호출 직후 모델 RAM/VRAM 자동 해제 (기본 `1`)
+
+자동 해제는 Ollama와 LM Studio를 지원합니다. 메모리 부족을 줄이는 대신 다음 로컬
+호출에서는 모델을 다시 로드하므로 시작 시간이 늘어날 수 있습니다. `llama.cpp`의
+OpenAI 호환 서버는 표준 언로드 API가 없어 서버 프로세스를 임의 종료하지 않습니다.
 
 Ollama 예시:
 
@@ -156,6 +167,11 @@ python -m shortly web
 # 이 PC:  http://localhost:8756
 # 같은 공유기의 다른 PC: http://<이 PC의 LAN IP>:8756  (실행 시 주소를 안내합니다)
 ```
+
+로컬 `web` 명령은 기존 학습·가이드·설정 경로를 변경하지 않으면서 개인판의 생성
+에셋 검토·자동 배치 라우트를 함께 제공합니다. 명시적인 개인판 런처의 제품별 저장
+영역과는 구분되는 호환 모드입니다. 비용이 발생하는 개인 자동화 API는 이 PC의
+loopback 접속에서만 허용됩니다.
 
 기본으로 `0.0.0.0` 에 바인딩되어 **같은 공유기(LAN)의 다른 PC/휴대폰에서도 접속**할 수 있습니다. 다른 기기는 화면만 볼 뿐, **다운로드·분석 등 모든 처리는 이 PC(서버)에서** 수행됩니다.
 

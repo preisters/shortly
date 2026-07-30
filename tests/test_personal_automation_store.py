@@ -86,6 +86,16 @@ class PersonalAutomationStoreTests(unittest.TestCase):
             "selected",
         )
 
+    def test_manifest_can_be_resumed_by_source_guide_hash(self) -> None:
+        found = self.store.find_manifest_by_source_hash(
+            self.manifest.source_guide_hash
+        )
+        self.assertIsNotNone(found)
+        self.assertEqual(found.manifest_id, self.manifest.manifest_id)
+        self.assertIsNone(
+            self.store.find_manifest_by_source_hash("not-a-known-hash")
+        )
+
     def test_workflow_rejects_implicit_or_invalid_transitions(self) -> None:
         run = WorkflowRun()
         run.advance(WorkflowStage.SCRIPT)

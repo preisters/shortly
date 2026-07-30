@@ -6,6 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from shortly.apps.personal.automation.capcut_assets import (
+    PreparedExport,
+    commit_export,
+    load_prepared_export,
     prepare_export,
     validate_capcut_project,
 )
@@ -21,8 +24,24 @@ from shortly.core.domain.assets import (
     MediaKind,
 )
 from shortly.core.use_cases.build_cut_manifest import build_cut_manifest
-from shortly.generate.capcut_export import _build_photo_segment
-from shortly.llm.base import LLMClient
+from shortly.generate.capcut_export import (
+    _build_photo_segment,
+    _caption_pages,
+    _caption_safe_korean,
+    _ensure_intro_start_sfx,
+    _find_reference_text_template,
+    _intro_timing,
+    _place_intro_transition_click,
+    _plan_sentences,
+    _reference_asset_layout,
+    _retime_body_title_placeholders,
+    _split_sentences,
+)
+from shortly.llm.base import (
+    LLMClient,
+    LLMError,
+    LLMResponseParseError,
+)
 
 
 class _ReviewLlm(LLMClient):
@@ -34,6 +53,16 @@ class _ReviewLlm(LLMClient):
 
     def complete_json(self, *args, **kwargs):
         return {"passed": True, "summary": "ok", "findings": []}
+
+
+class _FailedReviewLlm(_ReviewLlm):
+    def complete_json(self, *args, **kwargs):
+        raise LLMError("connection refused")
+
+
+class _MalformedReviewLlm(_ReviewLlm):
+    def complete_json(self, *args, **kwargs):
+        raise LLMResponseParseError("invalid json")
 
 
 class PersonalReviewAndExportTests(unittest.TestCase):
@@ -48,6 +77,30 @@ class PersonalReviewAndExportTests(unittest.TestCase):
         self.assertTrue(report.passed)
         self.assertEqual(report.reviewer, "local-qwen:qwen-fixture")
         self.assertEqual(manifest.to_dict(), before)
+
+    def test_qwen_review_distinguishes_request_and_parse_failures(self) -> None:
+        manifest = build_cut_manifest(
+            {"title": "fixture", "segments": [{"duration_sec": 1}]}
+        )
+
+        request_failure = qwen_read_only_review(
+            _FailedReviewLlm(),
+            manifest,
+        )
+        parse_failure = qwen_read_only_review(
+            _MalformedReviewLlm(),
+            manifest,
+        )
+
+        self.assertEqual(
+            request_failure.findings[0].code,
+            "local_model_request_failed",
+        )
+        self.assertIn("LM Studio", request_failure.findings[0].message)
+        self.assertEqual(
+            parse_failure.findings[0].code,
+            "review_parse_failed",
+        )
 
     def test_prepare_export_validates_selected_assets_without_capcut_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -69,6 +122,10 @@ class PersonalReviewAndExportTests(unittest.TestCase):
             asset.write_bytes(b"fixture")
             cut = manifest.cuts[0]
             cut.asset_type = AssetType.GENERATED_IMAGE
+            cut.disclosure_text = (
+                "이 이미지는 이해를 돕기 위한 AI 생성\n"
+                "이미지이며, 실존 인물이 아닙니다."
+            )
             candidate = AssetCandidate(
                 provider="fake",
                 model="fake",
@@ -86,6 +143,9 @@ class PersonalReviewAndExportTests(unittest.TestCase):
                 "shortly.apps.personal.automation.capcut_assets.find_capcut_draft_root",
                 return_value=capcut,
             ), patch(
+                "shortly.apps.personal.automation.capcut_assets._find_template_project",
+                return_value=capcut / "template",
+            ), patch(
                 "shortly.apps.personal.automation.capcut_assets._pick_templates",
                 return_value=({}, {}, {}),
             ):
@@ -100,7 +160,441 @@ class PersonalReviewAndExportTests(unittest.TestCase):
             self.assertEqual(
                 prepared.cut_assets["s000-c00"]["candidate_id"], candidate.id
             )
+            self.assertEqual(
+                prepared.cut_assets["s000-c00"]["path"], str(asset.resolve())
+            )
+            self.assertIn(
+                "실존 인물이 아닙니다",
+                prepared.cut_assets["s000-c00"]["disclosure_text"],
+            )
             self.assertEqual(list(capcut.iterdir()), [])
+
+    def test_ai_person_disclosure_style_is_found_in_manual_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "사실 너만 모르던 스테디셀러 떡"
+            reference.mkdir()
+            material_id = "disclosure-material"
+            (reference / "draft_content.json").write_text(
+                __import__("json").dumps(
+                    {
+                        "materials": {
+                            "texts": [
+                                {
+                                    "id": material_id,
+                                    "type": "text",
+                                    "content": __import__("json").dumps(
+                                        {
+                                            "text": (
+                                                "이 이미지는 이해를 돕기 위한 AI 생성\n"
+                                                "이미지이며, 실존 인물이 아닙니다."
+                                            )
+                                        },
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                            ]
+                        },
+                        "tracks": [
+                            {
+                                "type": "text",
+                                "segments": [
+                                    {
+                                        "material_id": material_id,
+                                        "target_timerange": {
+                                            "start": 0,
+                                            "duration": 1_000_000,
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            template = _find_reference_text_template(
+                root,
+                ("AI 생성", "실존 인물이 아닙니다"),
+            )
+
+        self.assertIsNotNone(template)
+        self.assertEqual(template["project"], reference.name)
+
+    def test_prepare_export_blocks_unselected_stock_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = AutomationStore(root / "automation.sqlite3")
+            manifest = build_cut_manifest(
+                {
+                    "title": "fixture",
+                    "segments": [
+                        {
+                            "index": 0,
+                            "duration_sec": 1,
+                            "image_suggestions": ["시장 자료 사진"],
+                        }
+                    ],
+                }
+            )
+            cut = manifest.cuts[0]
+            cut.asset_type = AssetType.STOCK_IMAGE
+            store.save_manifest(manifest)
+            capcut = root / "capcut"
+            capcut.mkdir()
+
+            with patch(
+                "shortly.apps.personal.automation.capcut_assets.find_capcut_draft_root",
+                return_value=capcut,
+            ), patch(
+                "shortly.apps.personal.automation.capcut_assets._find_template_project",
+                return_value=capcut / "template",
+            ), patch(
+                "shortly.apps.personal.automation.capcut_assets._pick_templates",
+                return_value=({}, {}, {}),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    cut.id,
+                ):
+                    prepare_export(
+                        store=store,
+                        manifest_id=manifest.manifest_id,
+                        guide={"title": "fixture", "segments": []},
+                        staging_root=root / "staging",
+                    )
+
+    def test_commit_export_reuses_template_tts_and_selected_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            asset = root / "asset.png"
+            asset.write_bytes(b"fixture")
+            prepared = PreparedExport(
+                id="export",
+                manifest_id="manifest",
+                root=str(root),
+                guide={"title": "fixture", "segments": []},
+                cut_assets={
+                    "s000-c00": {
+                        "path": str(asset),
+                        "media_kind": "image",
+                        "candidate_id": "candidate",
+                    }
+                },
+                plan_path=str(root / "prepared-export.json"),
+                template_name="챙맛 템플릿",
+            )
+            expected = {"ok": False, "reason": "fixture"}
+
+            with patch(
+                "shortly.apps.personal.automation.capcut_assets.export_via_template",
+                return_value=expected,
+            ) as export:
+                result = commit_export(
+                    prepared,
+                    tts_cfg="tts-config",
+                    tts_out_dir="tts-output",
+                )
+
+        self.assertEqual(result["prepared_export_id"], "export")
+        export.assert_called_once_with(
+            prepared.guide,
+            root_override=str(root),
+            template_name="챙맛 템플릿",
+            tts_cfg="tts-config",
+            tts_out_dir="tts-output",
+            cut_assets=prepared.cut_assets,
+        )
+
+    def test_legacy_prepared_image_is_upgraded_to_original(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared_image = root / "prepared-1080x1920.jpg"
+            original_image = root / "image-original.png"
+            prepared_image.write_bytes(b"prepared")
+            original_image.write_bytes(b"original")
+            plan = root / "prepared-export.json"
+            plan.write_text(
+                __import__("json").dumps(
+                    {
+                        "id": "export",
+                        "manifest_id": "manifest",
+                        "root": str(root),
+                        "guide": {},
+                        "cut_assets": {
+                            "s000-c00": {
+                                "path": str(prepared_image),
+                                "media_kind": "image",
+                                "candidate_id": "candidate",
+                            }
+                        },
+                        "plan_path": str(plan),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = load_prepared_export(plan)
+
+        self.assertEqual(
+            loaded.cut_assets["s000-c00"]["path"],
+            str(original_image.resolve()),
+        )
+
+    def test_reference_layout_follows_manual_aspect_ratio_medians(self) -> None:
+        self.assertEqual(_reference_asset_layout(1024, 1536), (0.64, -0.21))
+        self.assertEqual(
+            _reference_asset_layout(1080, 1920, "video"),
+            (0.74, -0.1),
+        )
+        self.assertEqual(_reference_asset_layout(1000, 1000), (0.72, -0.12))
+        self.assertEqual(_reference_asset_layout(1280, 720), (0.8, -0.1))
+
+    def test_caption_planner_preserves_quoted_sentence(self) -> None:
+        text = "사실 처음 먹어보면 '어? 이거 어디서 먹어본 맛인데?' 싶다고"
+
+        self.assertEqual(_split_sentences(text), [text])
+        pages = _caption_pages(text)
+
+        self.assertTrue(
+            any(
+                "'어? 이거 어디서 먹어본 맛인데?'" in line
+                for page in pages
+                for line in page
+            )
+        )
+
+    def test_two_line_caption_accumulates_with_tts_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            plan = _plan_sentences(
+                [
+                    {
+                        "narration": (
+                            "요즘 난리난 상하이 버터떡, "
+                            "언론이 억지로 밀어버린 거라고 함"
+                        )
+                    }
+                ],
+                None,
+                Path(temporary),
+            )
+
+        first, second = plan["captions"][:2]
+        self.assertTrue(first["text"].endswith("\n"))
+        self.assertTrue(second["text"].startswith("\n"))
+        self.assertEqual(first["layer"], 0)
+        self.assertEqual(second["layer"], 1)
+        self.assertGreater(second["start"], first["start"])
+        self.assertEqual(
+            first["start"] + first["dur"],
+            second["start"] + second["dur"],
+        )
+
+    def test_caption_pages_follow_punctuation_and_balance_lines(self) -> None:
+        pages = _caption_pages(
+            "지도에서 섬 하나만 지우면 일본 시장이 열리는데, "
+            "그걸 걷어차버린 한국 제품이 있다고"
+        )
+
+        self.assertEqual(
+            pages,
+            [
+                [
+                    "지도에서 섬 하나만 지우면",
+                    "일본 시장이 열리는데,",
+                ],
+                ["그걸 걷어차버린 한국 제품이 있다고"],
+            ],
+        )
+
+    def test_caption_pages_do_not_leave_one_word_orphan(self) -> None:
+        self.assertEqual(
+            _caption_pages("회사가 대기업 인수 검토설까지 나왔다는 거"),
+            [["회사가 대기업 인수 검토설까지 나왔다는 거"]],
+        )
+
+    def test_caption_pages_pair_short_comma_clauses(self) -> None:
+        self.assertEqual(
+            _caption_pages(
+                "요즘 난리난 상하이 버터떡, "
+                "언론이 억지로 밀어버린 거라고 함"
+            ),
+            [[
+                "요즘 난리난 상하이 버터떡,",
+                "언론이 억지로 밀어버린 거라고 함",
+            ]],
+        )
+
+    def test_caption_safe_korean_converts_known_and_removes_unknown_hanja(self) -> None:
+        sanitized = _caption_safe_korean("日 수출과 龍 문양")
+
+        self.assertEqual(sanitized, "일본 수출과 문양")
+        self.assertNotRegex(
+            sanitized,
+            r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]",
+        )
+
+    def test_caption_plan_sanitizes_hanja_before_tts_and_rendering(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            plan = _plan_sentences(
+                [{"narration": "독도 포장지로 日 수출이 막혔다고"}],
+                None,
+                Path(temporary),
+            )
+
+        self.assertEqual(
+            plan["audios"][0]["text"],
+            "독도 포장지로 일본 수출이 막혔다고",
+        )
+        rendered = " ".join(item["text"] for item in plan["captions"])
+        self.assertIn("일본 수출", rendered)
+        self.assertNotRegex(
+            rendered,
+            r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]",
+        )
+
+    def test_intro_timing_keeps_start_sfx_and_title_tts_separate(self) -> None:
+        title_start, intro_end = _intro_timing(
+            1_000_000,
+            1_700_000,
+            733_333,
+        )
+
+        self.assertEqual(title_start, 733_333)
+        self.assertEqual(intro_end, 2_433_333)
+
+    def test_intro_sfx_and_transition_click_follow_reference_timing(self) -> None:
+        start_material = {
+            "id": "start-sfx",
+            "type": "extract_music",
+            "name": "28. 띠링 - 시작음.mp3",
+            "path": "start.mp3",
+        }
+        document = {
+            "materials": {"audios": [start_material]},
+            "tracks": [
+                {
+                    "type": "audio",
+                    "segments": [
+                        {
+                            "id": "start-segment",
+                            "material_id": "start-sfx",
+                            "extra_material_refs": [],
+                            "target_timerange": {
+                                "start": 500_000,
+                                "duration": 733_333,
+                            },
+                            "source_timerange": {
+                                "start": 0,
+                                "duration": 733_333,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "장난감이 소금빵이 돼버린 왁뿌볼"
+            reference.mkdir()
+            (reference / "draft_content.json").write_text(
+                __import__("json").dumps(
+                    {
+                        "materials": {
+                            "audios": [
+                                {
+                                    "id": "click-sfx",
+                                    "type": "extract_music",
+                                    "name": "01. 클릭음.mp3",
+                                    "path": "click.mp3",
+                                }
+                            ]
+                        },
+                        "tracks": [
+                            {
+                                "type": "audio",
+                                "segments": [
+                                    {
+                                        "id": "click-segment",
+                                        "material_id": "click-sfx",
+                                        "extra_material_refs": [],
+                                        "target_timerange": {
+                                            "start": 1_566_666,
+                                            "duration": 266_667,
+                                        },
+                                        "source_timerange": {
+                                            "start": 0,
+                                            "duration": 266_667,
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            start = _ensure_intro_start_sfx(document, root)
+            click = _place_intro_transition_click(
+                document,
+                root,
+                2_433_333,
+            )
+
+        self.assertTrue(start["present"])
+        self.assertFalse(start["added"])
+        self.assertEqual(start["end"], 733_333)
+        self.assertEqual(
+            document["tracks"][0]["segments"][0]["target_timerange"]["start"],
+            0,
+        )
+        self.assertTrue(click["present"])
+        self.assertTrue(click["added"])
+        self.assertEqual(click["start"], 2_300_000)
+        self.assertEqual(
+            document["tracks"][-1]["segments"][0]["target_timerange"],
+            {"start": 2_300_000, "duration": 266_667},
+        )
+
+    def test_body_title_starts_at_first_cut_and_ends_with_video(self) -> None:
+        body_material = {
+            "id": "body-title",
+            "content": __import__("json").dumps(
+                {"text": "제목이 들어갑니다", "styles": []}
+            ),
+        }
+        document = {
+            "materials": {"texts": [body_material]},
+            "tracks": [
+                {
+                    "type": "text",
+                    "segments": [
+                        {
+                            "material_id": "body-title",
+                            "target_timerange": {
+                                "start": 1_000_000,
+                                "duration": 9_000_000,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        changed = _retime_body_title_placeholders(
+            document,
+            2_433_333,
+            12_000_000,
+        )
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(
+            document["tracks"][0]["segments"][0]["target_timerange"],
+            {"start": 2_433_333, "duration": 9_566_667},
+        )
 
     def test_capcut_segment_can_reference_generated_video(self) -> None:
         template = {
@@ -137,7 +631,11 @@ class PersonalReviewAndExportTests(unittest.TestCase):
             asset.write_bytes(b"fixture")
             document = {
                 "duration": 1_000_000,
-                "canvas_config": {"ratio": "9:16"},
+                "canvas_config": {
+                    "ratio": "original",
+                    "width": 1080,
+                    "height": 1920,
+                },
                 "materials": {
                     "videos": [
                         {

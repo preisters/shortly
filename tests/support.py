@@ -28,6 +28,8 @@ def isolated_shortly_env(**updates: str) -> Iterator[None]:
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "TYPECAST_API_KEY",
+        "PIXABAY_API_KEY",
+        "PEXELS_API_KEY",
     )
     before = {
         key: value

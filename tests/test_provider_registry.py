@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from shortly.apps.personal.local_llm import LOCAL_PROVIDER_NAMES
+from shortly.apps.personal.local_llm import (
+    AutoUnloadingLocalClient,
+    LOCAL_PROVIDER_NAMES,
+)
 from shortly.apps.personal.providers import (
     provider_registry as personal_provider_registry,
 )
@@ -46,9 +49,25 @@ class ProviderRegistryTests(unittest.TestCase):
             )
         )
         self.assertIsInstance(client, OpenAICompatibleClient)
+        self.assertIsInstance(client, AutoUnloadingLocalClient)
         self.assertEqual(client.provider, "local")
         self.assertEqual(client.text_model, "fixture-local")
         self.assertEqual(client.vision_model, "fixture-local")
+
+    def test_explicit_local_alias_selects_matching_unload_protocol(self) -> None:
+        client = get_llm(
+            Settings(
+                product=ProductKind.PERSONAL,
+                llm_provider="ollama",
+                text_model="fixture-local",
+                vision_model="",
+                local_base_url="http://127.0.0.1:9999/v1",
+                local_api_key="",
+            )
+        )
+
+        self.assertIsInstance(client, AutoUnloadingLocalClient)
+        self.assertEqual(client._resource_manager.runtime, "ollama")
 
 
 if __name__ == "__main__":

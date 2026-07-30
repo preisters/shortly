@@ -93,6 +93,10 @@ _RELATIVE_TIME = re.compile(
     r"(올해|작년|재작년|최근|요즘|이달|지난달|며칠\s*전|몇\s*년\s*전|수년\s*전)"
 )
 _ABSOLUTE_YEAR = re.compile(r"(19|20)\d{2}")
+_MEASURED_STAT = re.compile(
+    r"(?:\d[\d,.]*\s*(?:%|퍼센트|원|달러|명|개|건|배|억|만|조))|"
+    r"(?:(?:수출액|매출|점유율|증가율|감소율).{0,24}\d)"
+)
 
 
 def _sanitize_temporal_facts(hard_facts: List[str], avoid: List[str]
@@ -132,6 +136,29 @@ def _sanitize_temporal_facts(hard_facts: List[str], avoid: List[str]
         "한쪽의 시점·사건을 다른 쪽에 붙이지 말 것"
     )
     return kept, list(dict.fromkeys(extra_avoid))
+
+
+def _strip_unscoped_numeric_claims(
+    values: List[str],
+    avoid: List[str],
+) -> Tuple[List[str], List[str]]:
+    """Keep measured claims exclusively in validated quantified_facts."""
+
+    kept: List[str] = []
+    extra_avoid = list(avoid)
+    for value in values:
+        if _MEASURED_STAT.search(value):
+            extra_avoid.append(
+                "구조화된 수치 팩트가 아닌 일반 요약의 수치는 대본에 쓰지 말 것: "
+                f"{value[:140]}"
+            )
+            continue
+        kept.append(value)
+    return kept, list(dict.fromkeys(extra_avoid))
+
+
+def _canonical_source_url(value: str) -> str:
+    return value.strip().split("#", 1)[0].split("?", 1)[0].rstrip("/")
 
 
 def _search_ddgs(query: str, max_results: int) -> List[Dict]:
@@ -288,6 +315,31 @@ def _filter_overcautious_avoids(avoid: List[str], raw: Dict) -> List[str]:
 
 def _build_brief_text(base: Dict) -> str:
     parts = []
+    if base.get("quantified_facts"):
+        lines = []
+        for fact in base["quantified_facts"]:
+            comparison = " ".join(
+                str(fact.get(key) or "").strip()
+                for key in (
+                    "comparison_period",
+                    "comparison_value",
+                    "change",
+                )
+            ).strip()
+            line = (
+                f"- 주체·범위: {fact['subject']} / 지표: {fact['metric']} / "
+                f"기준시점: {fact['period']} / 값: {fact['value']} {fact['unit']}"
+            )
+            if comparison:
+                line += f" / 비교: {comparison}"
+            line += (
+                f" / 출처: {fact['source_label']} ({fact['source_url']})"
+            )
+            lines.append(line)
+        parts.append(
+            "[출처·범위가 정리된 수치 — 아래 주체·범위·기준시점·출처를 함께 유지할 때만 대본에 사용]\n"
+            + "\n".join(lines)
+        )
     if base.get("hard_facts"):
         parts.append(
             "[하드 팩트 — 사건으로 적극 사용. 확인된 갈등/대치는 밋밋하게 줄이지 말 것]\n"
@@ -323,6 +375,8 @@ def distill_research(llm: Optional[LLMClient], topic: str, raw: Dict) -> Dict:
         "queries": raw.get("queries") or [],
         "results": raw.get("results") or [],
         "backend": raw.get("backend"),
+        "subject_filter": raw.get("subject_filter"),
+        "quantified_facts": [],
         "hard_facts": [],
         "drama_beats": [],
         "soft_angles": [],
@@ -358,6 +412,12 @@ def distill_research(llm: Optional[LLMClient], topic: str, raw: Dict) -> Dict:
         "그걸 avoid 로 올리지 말고 hard_facts/drama_beats 로 올려라. "
         "avoid 에는 스니펫에 없는 세부 대화문·금액·날짜·주체 뒤집기·'인정하라' 창작만 넣는다. "
         "스니펫에 없는 인과를 보강하지 마라. soft_angles 는 분위기만.\n"
+        "수치(매출·수출액·비율·증가율·가격·인원 등)는 별도 quantified_facts로 추출한다. "
+        "주체/지역/품목 범위, 정확한 지표명, 값과 단위, 절대 기준연도·기간, 출처 URL이 "
+        "모두 확인되는 경우에만 넣는다. 기사 게시연도와 통계 기준연도를 구분하고, "
+        "전국 김 수출과 특정 지역 김 수출, 전체 김과 조미김처럼 범위가 다른 통계를 섞지 마라. "
+        "업계 전체 수치를 특정 회사의 실적으로 표현하지 마라. 불완전한 수치는 quantified_facts와 "
+        "hard_facts 양쪽에서 모두 제외하고 avoid_claims에 이유를 남겨라.\n"
         "시점·주체(매우 중요):\n"
         "- hard_facts 의 시점에는 가능하면 절대 연도(예: 2011년)를 붙여라. "
         "'올해/작년/최근'만 있으면 그 문장을 hard_facts 에 넣지 말고 avoid 에 "
@@ -368,7 +428,12 @@ def distill_research(llm: Optional[LLMClient], topic: str, raw: Dict) -> Dict:
         "문장 주어를 엄격히 분리해라. A의 '올해 초 수출 불발'을 B hard_facts 에 넣지 마라."
     )
     schema = (
-        '{"hard_facts": string[](스니펫 근거 사건·제품·절대연도 가능하면 포함, 주체 명시), '
+        '{"quantified_facts": [{"subject": string(통계 주체·지역·품목 범위), '
+        '"metric": string, "value": string, "unit": string, '
+        '"period": string(절대연도·기간), "comparison_value": string, '
+        '"comparison_period": string, "change": string, '
+        '"source_label": string, "source_url": string}], '
+        '"hard_facts": string[](스니펫 근거 사건·제품·절대연도 가능하면 포함, 주체 명시), '
         '"drama_beats": string[](스니펫 근거 갈등/대치/한 방), '
         '"soft_angles": string[](분위기 과장만), '
         '"curiosity_hooks": string[](근거 있는 궁금증), '
@@ -380,7 +445,7 @@ def distill_research(llm: Optional[LLMClient], topic: str, raw: Dict) -> Dict:
         f"스키마: {schema}"
     )
     try:
-        data = llm.complete_json(system, user, temperature=0.1, max_tokens=2500)
+        data = llm.complete_json(system, user, temperature=0.1, max_tokens=3500)
     except LLMError as exc:
         log.info("리서치 요약 LLM 실패: %s", exc)
         base["hard_facts"] = _enrich_conflict_facts([], raw)
@@ -401,9 +466,61 @@ def distill_research(llm: Optional[LLMClient], topic: str, raw: Dict) -> Dict:
         if isinstance(val, list):
             base[key] = [str(x).strip() for x in val if str(x).strip()]
 
+    quantified = data.get("quantified_facts") or []
+    allowed_source_urls = {
+        _canonical_source_url(str(row.get("url") or ""))
+        for row in base["results"]
+        if isinstance(row, dict) and str(row.get("url") or "").strip()
+    }
+    if isinstance(quantified, list):
+        for value in quantified:
+            if not isinstance(value, dict):
+                continue
+            normalized = {
+                key: str(value.get(key) or "").strip()
+                for key in (
+                    "subject",
+                    "metric",
+                    "value",
+                    "unit",
+                    "period",
+                    "comparison_value",
+                    "comparison_period",
+                    "change",
+                    "source_label",
+                    "source_url",
+                )
+            }
+            required = (
+                "subject",
+                "metric",
+                "value",
+                "unit",
+                "period",
+                "source_label",
+                "source_url",
+            )
+            if all(normalized[key] for key in required) and (
+                _ABSOLUTE_YEAR.search(normalized["period"])
+                and normalized["source_url"].startswith(("http://", "https://"))
+                and _canonical_source_url(normalized["source_url"])
+                in allowed_source_urls
+            ):
+                base["quantified_facts"].append(normalized)
+
     base["hard_facts"] = _enrich_conflict_facts(base["hard_facts"], raw)
     base["hard_facts"], base["avoid_claims"] = _sanitize_temporal_facts(
         base["hard_facts"], base["avoid_claims"])
+    for key in (
+        "hard_facts",
+        "drama_beats",
+        "soft_angles",
+        "curiosity_hooks",
+    ):
+        base[key], base["avoid_claims"] = _strip_unscoped_numeric_claims(
+            base[key],
+            base["avoid_claims"],
+        )
     if base["hard_facts"] and not base["drama_beats"]:
         base["drama_beats"] = [
             h for h in base["hard_facts"]
@@ -424,19 +541,71 @@ def distill_research(llm: Optional[LLMClient], topic: str, raw: Dict) -> Dict:
     return base
 
 
-def research_topic(topic: str, llm: Optional[LLMClient] = None,
-                   max_results: int = 8, max_queries: int = 4) -> Dict:
+def research_topic(
+    topic: str,
+    llm: Optional[LLMClient] = None,
+    max_results: int = 8,
+    max_queries: int = 4,
+    subject_anchors: Optional[List[str]] = None,
+    seed_results: Optional[List[Dict]] = None,
+) -> Dict:
     """주제 웹 조사 + (가능하면) LLM 요약. 실패해도 빈 구조 반환."""
     topic = (topic or "").strip()
     if not topic:
         return {
             "queries": [], "results": [], "backend": "none",
-            "hard_facts": [], "drama_beats": [], "soft_angles": [],
+            "quantified_facts": [], "hard_facts": [], "drama_beats": [],
+            "soft_angles": [],
             "curiosity_hooks": [], "avoid_claims": [],
             "brief_text": "", "thin": True,
         }
     log.info("웹 조사 시작: %s", topic[:60])
     raw = collect_raw(topic, max_results=max_results, max_queries=max_queries)
+    if seed_results:
+        combined_results = []
+        seen = set()
+        for row in [*seed_results, *(raw.get("results") or [])]:
+            if not isinstance(row, dict):
+                continue
+            key = _canonical_source_url(str(row.get("url") or "")) or str(
+                row.get("title") or ""
+            ).strip().casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            combined_results.append(row)
+        raw["results"] = combined_results
+        raw["seeded_results"] = len(seed_results)
+    anchors = [
+        re.sub(r"\s+", "", str(value or "")).casefold()
+        for value in subject_anchors or []
+        if str(value or "").strip()
+    ]
+    if anchors:
+        original_results = list(raw.get("results") or [])
+        filtered_results = []
+        for row in original_results:
+            blob = re.sub(
+                r"\s+",
+                "",
+                f"{row.get('title', '')} {row.get('snippet', '')}",
+            ).casefold()
+            if any(anchor in blob for anchor in anchors):
+                filtered_results.append(row)
+        raw["results"] = filtered_results
+        raw["subject_filter"] = {
+            "anchors": list(subject_anchors or []),
+            "excluded_results": len(original_results) - len(filtered_results),
+        }
+        raw["results"] = filtered_results[: max(8, max_results * 2)]
+        log.info(
+            "웹 조사 주체 필터: anchors=%s kept=%d excluded=%d",
+            subject_anchors,
+            len(raw["results"]),
+            len(original_results) - len(filtered_results),
+        )
+    elif len(raw.get("results") or []) > max(8, max_results * 2):
+        raw["results"] = list(raw["results"])[: max(8, max_results * 2)]
     log.info("웹 조사 결과 %d건 (backend=%s)",
              len(raw.get("results") or []), raw.get("backend"))
     return distill_research(llm, topic, raw)

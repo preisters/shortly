@@ -96,6 +96,9 @@ class CutSpec:
     prompt: str
     asset_type: AssetType
     media_kind: MediaKind
+    stock_query: str = ""
+    person_depiction: str = "none"
+    disclosure_text: str = ""
     fact_sensitive: bool = False
     approval_status: ApprovalStatus = ApprovalStatus.NOT_REQUIRED
     candidates: list[AssetCandidate] = field(default_factory=list)
@@ -138,6 +141,11 @@ class CutSpec:
             media_kind=MediaKind(
                 value.get("media_kind") or MediaKind.IMAGE.value
             ),
+            stock_query=str(value.get("stock_query") or ""),
+            person_depiction=str(
+                value.get("person_depiction") or "none"
+            ),
+            disclosure_text=str(value.get("disclosure_text") or ""),
             fact_sensitive=bool(value.get("fact_sensitive", False)),
             approval_status=ApprovalStatus(
                 value.get("approval_status")

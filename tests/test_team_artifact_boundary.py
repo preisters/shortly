@@ -43,6 +43,8 @@ class TeamArtifactBoundaryTests(unittest.TestCase):
             self.assertNotIn("Ollama", index)
             self.assertNotIn("/api/local-models", script)
             self.assertNotIn("loadLocalModels", script)
+            self.assertNotIn("/api/personal/manifests/from-guide", script)
+            self.assertNotIn("addPersonalAssetAutomation", script)
             self.assertIn(
                 "shortly.apps.team.launcher",
                 (output / "run.bat").read_text(encoding="utf-8"),

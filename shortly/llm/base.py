@@ -16,6 +16,10 @@ class LLMUnavailable(LLMError):
     """API 키 미설정 또는 SDK 미설치로 사용 불가."""
 
 
+class LLMResponseParseError(LLMError):
+    """The provider responded, but its text was not valid structured output."""
+
+
 class LLMClient:
     """모든 제공자가 구현하는 공통 인터페이스.
 
@@ -83,4 +87,4 @@ def parse_json_loose(text: str) -> Any:
                 return json.loads(s[start:end + 1])
             except json.JSONDecodeError:
                 continue
-    raise LLMError(f"JSON 파싱 실패: {text[:200]}")
+    raise LLMResponseParseError(f"JSON 파싱 실패: {text[:200]}")

@@ -29,6 +29,10 @@ _RELATIVE_ONLY = re.compile(
     r"며칠\s*전|몇\s*년\s*전|수년\s*전)"
 )
 _YEAR = re.compile(r"(19|20)\d{2}")
+_NUMERIC_CLAIM = re.compile(
+    r"(?:\d[\d,.]*\s*(?:%|퍼센트|원|달러|명|개|건|배|억|만|조))|"
+    r"(?:전년|전월|전분기|증가|감소|수출액|매출|점유율)"
+)
 
 
 def _script_lines(script: Dict) -> List[str]:
@@ -51,6 +55,31 @@ def _format_research(research: Optional[Dict]) -> str:
     if not research:
         return "(조사 메모 없음)"
     parts: List[str] = []
+    if research.get("quantified_facts"):
+        parts.append(
+            "[범위·시점·출처가 정리된 수치]\n"
+            + "\n".join(
+                "- "
+                + " / ".join(
+                    str(fact.get(key) or "").strip()
+                    for key in (
+                        "subject",
+                        "metric",
+                        "period",
+                        "value",
+                        "unit",
+                        "comparison_period",
+                        "comparison_value",
+                        "change",
+                        "source_label",
+                        "source_url",
+                    )
+                    if str(fact.get(key) or "").strip()
+                )
+                for fact in research["quantified_facts"]
+                if isinstance(fact, dict)
+            )
+        )
     if research.get("hard_facts"):
         parts.append("[하드 팩트]\n" + "\n".join(
             f"- {x}" for x in research["hard_facts"]))
@@ -105,6 +134,50 @@ def _extra_temporal_search(topic: str, script: Dict,
     return merged
 
 
+def _extra_numeric_search(script: Dict, max_results: int = 6) -> List[Dict]:
+    """Search numeric claims again with their metric and scope words."""
+
+    merged: List[Dict] = []
+    seen = set()
+    for line in _script_lines(script):
+        if not _NUMERIC_CLAIM.search(line):
+            continue
+        compact = re.sub(r"[\"'“”‘’]", " ", line)
+        compact = re.sub(r"\s+", " ", compact).strip()
+        query = f"{compact[:120]} 기준연도 출처"
+        for row in web_search(query, max_results=3):
+            key = (row.get("url") or "").split("?")[0] or (
+                row.get("title") or ""
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(row)
+            if len(merged) >= max_results:
+                return merged
+    return merged
+
+
+def _extra_fact_search(topic: str, script: Dict) -> List[Dict]:
+    rows = [
+        *_extra_temporal_search(topic, script),
+        *_extra_numeric_search(script),
+    ]
+    merged: List[Dict] = []
+    seen = set()
+    for row in rows:
+        key = (row.get("url") or "").split("?")[0] or (
+            row.get("title") or ""
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+        if len(merged) >= 10:
+            break
+    return merged
+
+
 def _heuristic_flags(script: Dict, research: Optional[Dict]) -> List[str]:
     """규칙 기반 위험 신호 (LLM 보조)."""
     flags: List[str] = []
@@ -124,6 +197,11 @@ def _heuristic_flags(script: Dict, research: Optional[Dict]) -> List[str]:
                     f"문장{i}: '절호의 기회/수출 불발' 표현은 다른 회사(올바름) "
                     "기사에서 자주 나오므로 주체 혼동 여부 확인 필요"
                 )
+        if _NUMERIC_CLAIM.search(line) and not _YEAR.search(line):
+            flags.append(
+                f"문장{i}: 수치·통계 표현에 절대 기준연도가 없음 - "
+                "주체·지역·품목 범위와 기준기간을 함께 검증해야 함"
+            )
     # hard_facts 자체에 상대 시점이 섞여 있으면 경고
     for hf in (research or {}).get("hard_facts") or []:
         if _RELATIVE_ONLY.search(hf) and not _YEAR.search(hf):
@@ -140,6 +218,7 @@ def factcheck_script(
     topic: str = "",
     *,
     force: bool = False,
+    revision_instruction: str = "",
 ) -> Dict:
     """대본을 조사 메모·추가 시점 검색으로 재검증하고 필요 시 수정한다.
 
@@ -168,7 +247,7 @@ def factcheck_script(
         out["skipped"] = True
         return out
 
-    extra = _extra_temporal_search(topic, script)
+    extra = _extra_fact_search(topic, script)
     out["extra_results"] = extra
     extra_txt = ""
     if extra:
@@ -184,7 +263,9 @@ def factcheck_script(
         return out
 
     system = (
-        "너는 쇼츠 대본 팩트체커다. 목표: 환각·주체 혼동·시점 오류만 고친다.\n"
+        "너는 쇼츠 대본 팩트체커이자 최소 수정 편집자다. 목표는 이미 완성된 이야기 구조를 "
+        "유지하면서 환각·주체 혼동·시점 오류가 있는 정확한 구절만 고치는 것이다. "
+        "문제가 없는 비트의 순서·훅·정보 공개 구조·말투는 절대 다시 쓰지 마라.\n"
         "규칙:\n"
         "1) 시점: '올해/작년/최근/이달' 같은 상대 시점은 스니펫에 "
         "절대 연도(예: 2011년)가 명확히 그 주체·사건에 붙어 있을 때만 유지. "
@@ -194,9 +275,21 @@ def factcheck_script(
         "예: '올해 초 수출 불발'이 올바름 이야기면 성경식품에 쓰지 마라.\n"
         "3) 연도가 불확실하면 연도·'올해 초'를 빼고 "
         "'독도 표기 때문에 일본 수출을 포기했다'처럼 확인된 골격만 남겨라.\n"
-        "4) 말투·훅 임팩트·세그먼트 수·intent 는 최대한 유지. "
-        "재미를 위해 새 사건을 만들지 마라.\n"
-        "5) 문제 없으면 changed=false, script는 원문 그대로.\n"
+        "4) 말투·훅 임팩트·세그먼트 수·intent·기승전결은 그대로 유지한다. "
+        "오류가 있는 최소 구절만 교체하고, 한 오류 때문에 세그먼트 전체나 다른 세그먼트를 "
+        "재작성하지 마라. 재미를 위해 새 사건을 만들지 마라.\n"
+        "5) 수치: 모든 숫자·금액·비율·증가율은 조사 자료에서 동일한 값이 확인되는지 "
+        "검사하고, 통계의 주체·지역·품목 범위, 절대 기준연도/기간, 비교 기준을 유지한다. "
+        "전국과 특정 지역, 전체 김과 조미김, 업계 전체와 특정 회사 수치를 혼동하지 마라. "
+        "업계 통계를 특정 회사의 실적·인과처럼 붙이지 마라. 기사 스니펫만 근거라면 "
+        "'몇 년 보도 기준'처럼 한계를 밝히고, 짧게 정확히 쓸 수 없으면 수치를 삭제한다.\n"
+        "6) 인수·계약·협상은 기사 본문의 최종 상태까지 확인한다. 제목이 검토설이어도 "
+        "본문에 당사자의 부인이나 결렬이 있으면 그 상태를 반영한다.\n"
+        "7) 대본 수정 요청이 함께 제공되면 그 요청의 방향과 수정 범위를 보존한다. "
+        "예를 들어 '마무리만'이면 다른 세그먼트·제목을 바꾸지 않는다. 요청한 세부 수치가 "
+        "불확실하면 검증된 같은 방향의 사실로 완화하되, 사용자가 제거하라고 한 문장이나 "
+        "전혀 다른 결말을 되살리지 않는다.\n"
+        "8) 문제 없으면 changed=false, script는 원문 그대로.\n"
         "JSON만 출력."
     )
     schema = (
@@ -208,9 +301,11 @@ def factcheck_script(
     )
     user = (
         f"[주제/입력]\n{(topic or '')[:1500]}\n\n"
+        f"[이번 대본 수정 요청]\n"
+        f"{(revision_instruction or '(신규 생성 — 수정 요청 없음)')[:1500]}\n\n"
         f"[생성 대본 JSON]\n{json.dumps(script, ensure_ascii=False)[:3500]}\n\n"
         f"[조사 메모·스니펫]\n{_format_research(research)[:4500]}\n\n"
-        f"[시점 추가 검색]\n{extra_txt[:2500] or '(없음)'}\n\n"
+        f"[시점·수치 추가 검색]\n{extra_txt[:2500] or '(없음)'}\n\n"
         f"[규칙 기반 위험 신호]\n"
         + ("\n".join(f"- {x}" for x in flags) if flags else "(없음)")
         + f"\n\n스키마: {schema}"

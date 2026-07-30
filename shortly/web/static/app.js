@@ -403,6 +403,9 @@ async function loadSavedGuides() {
       del.textContent = "삭제";
       del.onclick = (e) => { e.stopPropagation(); deleteSavedGuide(channel, g.name, g.title); };
       li.appendChild(info);
+      /* shortly:local-script:start */
+      addPersonalAssetAutomation(li, channel, g.name, true);
+      /* shortly:local-script:end */
       li.appendChild(del);
       list.appendChild(li);
     });
@@ -463,6 +466,19 @@ function addCapcutExport(container, channel, name) {
   container.appendChild(wrap);
 }
 
+/* shortly:local-script:start */
+function addPersonalAssetAutomation(container, channel, name, compact = false) {
+  const link = document.createElement("a");
+  link.className = compact ? "g-assets secondary" : "download";
+  link.href =
+    `/personal/assets?channel=${encodeURIComponent(channel)}` +
+    `&name=${encodeURIComponent(name)}`;
+  link.textContent = compact ? "에셋 자동화" : "생성 에셋 검토·자동 배치";
+  link.onclick = (event) => event.stopPropagation();
+  container.appendChild(link);
+}
+/* shortly:local-script:end */
+
 function guideNameFromDir(dir) {
   return String(dir || "").split(/[\\/]/).filter(Boolean).pop() || "";
 }
@@ -497,6 +513,9 @@ async function openSavedGuide(channel, name, li) {
       mk("guide.json 다운로드", g.output_dir + "\\guide.json");
     }
     addCapcutExport(dl, channel, name);
+    /* shortly:local-script:start */
+    addPersonalAssetAutomation(dl, channel, name);
+    /* shortly:local-script:end */
     addReviseForm($("saved-guide-revise"), channel, name);
   } catch (e) {
     $("saved-guide-result").textContent = "가이드를 불러올 수 없습니다: " + e.message;
@@ -566,7 +585,12 @@ function addReviseForm(container, channel, name) {
             mk("guide.md 다운로드", r.output_dir + "\\guide.md");
             mk("guide.json 다운로드", r.output_dir + "\\guide.json");
           }
-          if (gname) addCapcutExport(dl, channel, gname);
+          if (gname) {
+            addCapcutExport(dl, channel, gname);
+            /* shortly:local-script:start */
+            addPersonalAssetAutomation(dl, channel, gname);
+            /* shortly:local-script:end */
+          }
           loadSavedGuides();
         } else {
           status.className = "capcut-status err";
@@ -638,7 +662,12 @@ $("btn-guide").onclick = async () => {
           mk("guide.json 다운로드", r.output_dir + "\\guide.json");
         }
         const gname = guideNameFromDir(r.output_dir);
-        if (gname) addCapcutExport(dl, channel, gname);
+        if (gname) {
+          addCapcutExport(dl, channel, gname);
+          /* shortly:local-script:start */
+          addPersonalAssetAutomation(dl, channel, gname);
+          /* shortly:local-script:end */
+        }
         loadSavedGuides();
       } else {
         $("guide-result").textContent = "실패: " + (r.reason || job.error || "");

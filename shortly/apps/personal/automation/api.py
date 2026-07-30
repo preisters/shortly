@@ -6,12 +6,17 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from ....config import get_settings
-from ....core.domain.assets import AssetType, MediaKind
-from ....core.use_cases.build_cut_manifest import build_cut_manifest
+from ....core.domain.assets import AssetType, CandidateStatus, MediaKind
+from ....core.use_cases.build_cut_manifest import (
+    AI_PERSON_IMAGE_DISCLOSURE,
+    AI_PERSON_VIDEO_DISCLOSURE,
+    ASSET_CLASSIFIER_VERSION,
+    build_cut_manifest,
+)
 from ....llm import get_llm
 from ..assets import GoogleVideoProvider, OpenAIImageProvider
 from ..local_llm import LOCAL_PROVIDER_NAMES
@@ -21,6 +26,7 @@ from .graph import WorkflowRun, WorkflowStage
 from .review import qwen_read_only_review, technical_review
 from .selection import select_candidate
 from .settings import PersonalAutomationSettings
+from .stock_search import StockSearchService
 from .store import (
     ApprovalRequiredError,
     AutomationStore,
@@ -34,6 +40,11 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 class ManifestRequest(BaseModel):
     guide: dict[str, Any]
     overrides: dict[str, str] = Field(default_factory=dict)
+
+
+class SavedGuideManifestRequest(BaseModel):
+    channel: str
+    name: str
 
 
 class CutTypeRequest(BaseModel):
@@ -53,6 +64,12 @@ class ExecuteRequest(BaseModel):
 class SelectionRequest(BaseModel):
     candidate_id: str
     reason: str = ""
+
+
+class StockSelectionRequest(BaseModel):
+    result_id: str
+    query: str = ""
+    provider: str = "openverse"
 
 
 class PrepareExportRequest(BaseModel):
@@ -104,12 +121,52 @@ def create_automation_components(base_settings=None):
     return settings, store, executor
 
 
+def _refresh_untouched_classification(
+    store: AutomationStore,
+    existing,
+    candidate,
+):
+    """Upgrade default recommendations without overwriting human or paid work."""
+
+    current_version = int(
+        existing.metadata.get("asset_classifier_version") or 0
+    )
+    if current_version >= ASSET_CLASSIFIER_VERSION:
+        return existing, False
+    has_work = (
+        bool(store.list_jobs(manifest_id=existing.manifest_id))
+        or bool(store.selection_history(existing.manifest_id))
+        or any(
+            cut.candidates or cut.selected_candidate_id
+            for cut in existing.cuts
+        )
+    )
+    if has_work:
+        return existing, False
+    candidate.manifest_id = existing.manifest_id
+    candidate.created_at = existing.created_at
+    candidate.metadata = {
+        **existing.metadata,
+        **candidate.metadata,
+        "classification_refreshed_from": current_version,
+    }
+    store.save_manifest(candidate)
+    return candidate, True
+
+
 def create_router(
     settings: PersonalAutomationSettings,
     store: AutomationStore,
     executor: AssetJobExecutor,
+    *,
+    service_api: Any,
 ) -> APIRouter:
     router = APIRouter()
+    stock_service = StockSearchService(
+        settings.assets_dir,
+        pixabay_api_key=settings.pixabay_api_key,
+        pexels_api_key=settings.pexels_api_key,
+    )
 
     @router.get("/personal/assets", response_class=HTMLResponse)
     def asset_console() -> HTMLResponse:
@@ -134,6 +191,13 @@ def create_router(
             },
             "candidate_count": settings.candidate_count,
             "max_regenerations": settings.max_regenerations,
+            "stock_search": {
+                "provider": stock_service.provider,
+                "providers": stock_service.statuses(),
+                "default_licenses": ["pdm", "cc0"],
+                "optional_licenses": ["by"],
+                "cost_usd": 0.0,
+            },
             "default_estimates_usd": {
                 "image": settings.image_estimated_cost_usd,
                 "video": settings.video_estimated_cost_usd,
@@ -148,6 +212,50 @@ def create_router(
             )
             store.save_manifest(manifest)
             return manifest.to_dict()
+        except Exception as exc:
+            raise _error(exc) from exc
+
+    @router.post("/api/personal/manifests/from-guide")
+    def create_manifest_from_saved_guide(
+        body: SavedGuideManifestRequest,
+    ) -> dict:
+        try:
+            saved = service_api.get_guide(body.channel, body.name)
+            if saved is None:
+                raise KeyError("저장된 가이드를 찾을 수 없습니다.")
+            guide = saved.get("guide")
+            if not isinstance(guide, dict) or not guide.get("segments"):
+                raise ValueError("저장된 가이드에 유효한 컷 정보가 없습니다.")
+
+            candidate = build_cut_manifest(guide)
+            manifest = store.find_manifest_by_source_hash(
+                candidate.source_guide_hash
+            )
+            reused = manifest is not None
+            defaults_refreshed = False
+            if manifest is None:
+                manifest = candidate
+                manifest.metadata.update(
+                    {
+                        "source_channel": body.channel,
+                        "source_guide_name": body.name,
+                    }
+                )
+                store.save_manifest(manifest)
+            else:
+                manifest, defaults_refreshed = (
+                    _refresh_untouched_classification(
+                        store,
+                        manifest,
+                        candidate,
+                    )
+                )
+            return {
+                "manifest": manifest.to_dict(),
+                "guide": guide,
+                "reused": reused,
+                "defaults_refreshed": defaults_refreshed,
+            }
         except Exception as exc:
             raise _error(exc) from exc
 
@@ -177,19 +285,44 @@ def create_router(
                 raise ValueError(
                     "Fact-sensitive cuts cannot use automatic generation."
                 )
+            previous_type = cut.asset_type
+            previous_candidate = cut.selected_candidate
+            selection_cleared = (
+                previous_type is not target and previous_candidate is not None
+            )
+            if selection_cleared:
+                previous_candidate.status = CandidateStatus.READY
+                cut.selected_candidate_id = None
             cut.asset_type = target
             cut.media_kind = (
                 MediaKind.VIDEO
                 if target is AssetType.GENERATED_VIDEO
                 else MediaKind.IMAGE
             )
+            if cut.person_depiction == "fictional_person":
+                cut.disclosure_text = (
+                    AI_PERSON_VIDEO_DISCLOSURE
+                    if target is AssetType.GENERATED_VIDEO
+                    else AI_PERSON_IMAGE_DISCLOSURE
+                    if target is AssetType.GENERATED_IMAGE
+                    else ""
+                )
             store.save_manifest(manifest)
             store.record_selection(
                 manifest_id=manifest_id,
                 cut_id=cut_id,
                 candidate_id=None,
                 action="asset_type_changed",
-                metadata={"asset_type": target.value},
+                metadata={
+                    "asset_type": target.value,
+                    "previous_asset_type": previous_type.value,
+                    "selection_cleared": selection_cleared,
+                    "previous_candidate_id": (
+                        previous_candidate.id
+                        if selection_cleared and previous_candidate
+                        else None
+                    ),
+                },
             )
             return cut.to_dict()
         except Exception as exc:
@@ -256,6 +389,95 @@ def create_router(
         except Exception as exc:
             raise _error(exc) from exc
 
+    @router.get(
+        "/api/personal/manifests/{manifest_id}/cuts/{cut_id}/preview"
+    )
+    def preview_selected_asset(manifest_id: str, cut_id: str):
+        try:
+            cut = store.load_manifest(manifest_id).cut(cut_id)
+            candidate = cut.selected_candidate
+            if candidate is None:
+                raise KeyError("선택된 에셋이 없습니다.")
+            original = Path(candidate.original_path or "")
+            prepared = Path(candidate.prepared_path or "")
+            source = (
+                original
+                if original.is_file()
+                else prepared
+                if prepared.is_file()
+                else None
+            )
+            if source is None:
+                raise KeyError("미리보기 파일을 찾을 수 없습니다.")
+            resolved = source.resolve()
+            allowed_root = settings.assets_dir.resolve()
+            if allowed_root not in resolved.parents:
+                raise ValueError("개인 에셋 폴더 밖의 파일은 표시할 수 없습니다.")
+            media_types = {
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".webp": "image/webp",
+                ".mp4": "video/mp4",
+            }
+            media_type = media_types.get(resolved.suffix.lower())
+            if media_type is None:
+                raise ValueError("미리보기를 지원하지 않는 파일 형식입니다.")
+            return FileResponse(
+                str(resolved),
+                media_type=media_type,
+                headers={"Cache-Control": "private, max-age=60"},
+            )
+        except Exception as exc:
+            raise _error(exc) from exc
+
+    @router.get(
+        "/api/personal/manifests/{manifest_id}/cuts/{cut_id}/stock-search"
+    )
+    def search_stock_images(
+        manifest_id: str,
+        cut_id: str,
+        q: str,
+        page: int = 1,
+        include_by: bool = False,
+        provider: str = "all",
+    ) -> dict:
+        try:
+            manifest = store.load_manifest(manifest_id)
+            cut = manifest.cut(cut_id)
+            if cut.asset_type is not AssetType.STOCK_IMAGE:
+                raise ValueError(
+                    "스톡 이미지로 지정된 컷에서만 검색할 수 있습니다."
+                )
+            return stock_service.search(
+                q,
+                page=page,
+                include_by=include_by,
+                provider=provider,
+            )
+        except Exception as exc:
+            raise _error(exc) from exc
+
+    @router.post(
+        "/api/personal/manifests/{manifest_id}/cuts/{cut_id}/stock-select"
+    )
+    def select_stock_image(
+        manifest_id: str,
+        cut_id: str,
+        body: StockSelectionRequest,
+    ) -> dict:
+        try:
+            return stock_service.select(
+                store,
+                manifest_id=manifest_id,
+                cut_id=cut_id,
+                result_id=body.result_id,
+                query=body.query,
+                provider=body.provider,
+            )
+        except Exception as exc:
+            raise _error(exc) from exc
+
     @router.get("/api/personal/usage")
     def usage(manifest_id: Optional[str] = None) -> dict:
         return store.usage_summary(manifest_id)
@@ -281,12 +503,14 @@ def create_router(
     @router.post("/api/personal/exports/prepare")
     def prepare(body: PrepareExportRequest) -> dict:
         try:
+            base = get_settings()
             return prepare_export(
                 store=store,
                 manifest_id=body.manifest_id,
                 guide=body.guide,
                 staging_root=settings.assets_dir,
                 capcut_root=body.capcut_root,
+                template_name=base.capcut_template,
             ).to_dict()
         except Exception as exc:
             raise _error(exc) from exc
@@ -298,7 +522,12 @@ def create_router(
             allowed = settings.assets_dir.resolve()
             if allowed not in plan.parents:
                 raise ValueError("Prepared export must be inside the asset directory.")
-            return commit_export(load_prepared_export(plan))
+            base = get_settings()
+            return commit_export(
+                load_prepared_export(plan),
+                tts_cfg=base.typecast_config(),
+                tts_out_dir=str(base.tts_output_dir),
+            )
         except Exception as exc:
             raise _error(exc) from exc
 

@@ -365,6 +365,11 @@ def _synthesize(llm: LLMClient, manifest: Dict, stats: Dict,
         system = (
             "너는 유튜브 쇼츠 채널 스타일 분석가다. 주어진 통계와 '실제 대사 예시'로 이 채널의 "
             "편집·기획·화법 스타일을 요약하고, 같은 느낌으로 만들기 위한 실전 레시피를 제시한다.\n"
+            "중요: 자막/음성 인식 예시는 잘리거나 오인식될 수 있다. 오류 문법, 미완결 문장, "
+            "쉼표 연쇄를 채널 개성으로 오판하지 마라. 빈도가 높다는 이유만으로 연결어를 필수 "
+            "체크리스트로 만들지 마라. 채널 고유의 훅·톤·어미는 보존하되, 이야기의 인과·정보 "
+            "공개 순서·가독성·사실성은 모든 채널에 공통인 상위 품질 기준으로 둔다. "
+            "과장은 표현에만 허용하고 사건·수치·인과의 거짓 과장은 금지한다.\n"
             "가장 중요: [실제 대사 예시]의 말투와 문장 끝맺음(어미)을 그대로 관찰해 'voice' 필드에 "
             "구체적으로 기술하라. 이 채널은 '썰 풀어주는' 화법일 수 있으니, 실제로 쓰는 어미"
             "(예: '~다고 함', '~했는데', '~다는데', '~라고')를 예시와 함께 명시하라. "
@@ -374,6 +379,7 @@ def _synthesize(llm: LLMClient, manifest: Dict, stats: Dict,
         schema = (
             '{"style_summary": string(3~5문장, 화법 포함), '
             '"recipe": {"hook": string, '
+            '"story": string(훅부터 결말까지 정보 공개와 반전 구조), '
             '"voice": string(실제 말투·문장 끝맺음을 예시 어미와 함께 구체적으로. 반드시 채널 실제 대사 기준), '
             '"dialogue_spec": string(대사 총 글자수·문장 수·문장당 길이·말속도 등 구체 수치 범위), '
             '"pacing": string, "captions": string, '
@@ -392,6 +398,8 @@ def _synthesize(llm: LLMClient, manifest: Dict, stats: Dict,
             "dialogue_spec 에는 위 정량지표를 근거로 '대사 총 몇 자, 문장 몇 개, 문장당 몇 자, "
             "말속도 몇 자/초, 훅 몇 자 내외'처럼 재현 가능한 구체 수치를 반드시 담아라.\n"
             "voice 에는 [실제 대사 예시]에서 관찰되는 말투와 어미를 반드시 실제 예시와 함께 적어라.\n"
+            "story 에는 각 비트가 새 정보를 하나씩 추가하고 훅을 결말에서 회수하는 방식을 적어라. "
+            "do/avoid에는 특정 연결어 사용 횟수를 넣지 말고 구조적 품질 기준을 포함하라.\n"
             f"스키마: {schema}"
         )
         try:
@@ -421,6 +429,10 @@ def _synthesize(llm: LLMClient, manifest: Dict, stats: Dict,
         "voice": (
             f"실제 대사의 말투·어미를 그대로 모방. 자주 쓰는 문장 끝맺음: {top_endings}. "
             f"예시: {samples[0] if samples else ''}"
+        ),
+        "story": (
+            "훅→정체 공개→구체적 상황→선택/대치→대가→반전/보상 순으로 "
+            "새 정보를 하나씩 공개하고 마지막에 훅을 회수."
         ),
         "dialogue_spec": (
             f"대사 총 {ccn.get('min', 0)}~{ccn.get('max', 0)}자(평균 {ccn.get('avg', 0)}자), "

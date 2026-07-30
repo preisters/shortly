@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from ....core.domain.assets import CutManifest
-from ....llm.base import LLMClient, LLMError
+from ....llm.base import (
+    LLMClient,
+    LLMError,
+    LLMResponseParseError,
+    LLMUnavailable,
+)
 
 
 @dataclass(frozen=True)
@@ -103,7 +108,8 @@ def qwen_read_only_review(
             candidate.pop("prepared_path", None)
     system = (
         "You review a YouTube Shorts cut plan. Return feedback only. "
-        "Never propose or claim that you changed files, the manifest, or a project."
+        "Never propose or claim that you changed files, the manifest, or a project. "
+        "Be concise, return at most 6 findings, and keep each message under 120 characters."
     )
     user = (
         "다음 컷 구성을 검수하세요. JSON만 반환하세요. "
@@ -114,7 +120,7 @@ def qwen_read_only_review(
         f"technical={json.dumps((technical or technical_review(manifest)).to_dict(), ensure_ascii=False)}"
     )
     try:
-        value = llm.complete_json(system, user, temperature=0.1, max_tokens=2000)
+        value = llm.complete_json(system, user, temperature=0.1, max_tokens=800)
         findings = [
             ReviewFinding(
                 severity=str(item.get("severity") or "warning"),
@@ -131,7 +137,7 @@ def qwen_read_only_review(
             summary=str(value.get("summary") or ""),
             reviewer=f"local-qwen:{llm.text_model}",
         )
-    except (LLMError, ValueError, TypeError) as exc:
+    except LLMResponseParseError as exc:
         return ReviewReport(
             passed=False,
             findings=[
@@ -142,5 +148,38 @@ def qwen_read_only_review(
                 )
             ],
             summary="로컬 검수 결과 해석 실패",
+            reviewer=f"local-qwen:{llm.text_model}",
+        )
+    except (LLMUnavailable, LLMError) as exc:
+        return ReviewReport(
+            passed=False,
+            findings=[
+                ReviewFinding(
+                    "warning",
+                    "local_model_request_failed",
+                    (
+                        "로컬 모델 호출에 실패했습니다. LM Studio 서버가 "
+                        "설정된 주소에서 실행 중인지, 검수 모델이 로드됐는지 확인하세요. "
+                        f"오류 유형: {type(exc).__name__}"
+                    ),
+                )
+            ],
+            summary="로컬 검수 모델 호출 실패",
+            reviewer=f"local-qwen:{llm.text_model}",
+        )
+    except (ValueError, TypeError) as exc:
+        return ReviewReport(
+            passed=False,
+            findings=[
+                ReviewFinding(
+                    "warning",
+                    "review_schema_invalid",
+                    (
+                        "로컬 검수 JSON의 필드 형식이 올바르지 않습니다: "
+                        f"{type(exc).__name__}"
+                    ),
+                )
+            ],
+            summary="로컬 검수 응답 스키마 오류",
             reviewer=f"local-qwen:{llm.text_model}",
         )

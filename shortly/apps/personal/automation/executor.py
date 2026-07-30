@@ -13,6 +13,9 @@ from ....core.domain.assets import (
     CandidateStatus,
     MediaKind,
 )
+from ....core.use_cases.build_cut_manifest import (
+    generated_visual_requires_exact_source,
+)
 from ....core.ports.assets import (
     AssetGenerationError,
     ImageGenerationProvider,
@@ -25,6 +28,29 @@ from ..assets.postprocess import persist_original, prepare_image
 from .budget import assert_budget
 from .settings import PersonalAutomationSettings
 from .store import AutomationStore
+
+
+def _image_generation_prompt(
+    prompt: str,
+    *,
+    disclosure_text: str = "",
+) -> str:
+    person_requirement = (
+        "Any person must be a clearly fictional adult who does not resemble a "
+        "specific real person. Depict only the role, emotion, and situation. "
+        if disclosure_text
+        else ""
+    )
+    return (
+        f"{prompt.strip()}\n\n"
+        "Composition requirements: create a vertical 2:3 image at 1024x1536. "
+        "Keep the main subject centered with comfortable safe margins on every side "
+        "so it can be placed inside a 9:16 Shorts frame without cutting off important "
+        f"details. {person_requirement}"
+        "Do not add captions, quotes, letters, numbers, logos, watermarks, borders, "
+        "UI elements, data cards, charts, graphs, tables, documents, or geographic "
+        "maps. The CapCut project adds all verified text separately."
+    )
 
 
 class AssetJobExecutor:
@@ -52,6 +78,12 @@ class AssetJobExecutor:
     ) -> dict:
         manifest = self.store.load_manifest(manifest_id)
         cut = manifest.cut(cut_id)
+        if generated_visual_requires_exact_source(cut.prompt):
+            raise ValueError(
+                "지도·수치·그래프·정보 카드는 생성형 AI가 사실과 다른 내용을 "
+                "만들 수 있어 자동 생성할 수 없습니다. 원본 자료나 정확하게 "
+                "제작한 화면을 선택해 주세요."
+            )
         if cut.fact_sensitive:
             raise ValueError(
                 "Fact-sensitive cuts cannot use automatic generation."
@@ -99,7 +131,11 @@ class AssetJobExecutor:
             kind=kind,
             provider=provider,
             model=model,
-            request={"prompt": cut.prompt, "generation": generation_number},
+            request={
+                "prompt": cut.prompt,
+                "generation": generation_number,
+                "disclosure_text": cut.disclosure_text,
+            },
             idempotency_key=digest,
             max_attempts=1,
             estimated_cost_usd=effective_estimate,
@@ -180,8 +216,14 @@ class AssetJobExecutor:
 
     def _run_image(self, job: dict) -> dict:
         request = ImageGenerationRequest(
-            prompt=job["request"]["prompt"],
+            prompt=_image_generation_prompt(
+                job["request"]["prompt"],
+                disclosure_text=str(
+                    job["request"].get("disclosure_text") or ""
+                ),
+            ),
             model=job["model"],
+            size="1024x1536",
             idempotency_key=job["idempotency_key"],
         )
         asset = self.image_providers[job["provider"]].generate(request)

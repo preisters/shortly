@@ -164,6 +164,8 @@ class Settings:
     local_api_key: str = "ollama"
     # Qwen3 등 reasoning 모델의 thinking 을 꺼서 속도·토큰 절약(기본 켬)
     local_no_think: bool = True
+    # 로컬 호출 완료 직후 모델을 RAM/VRAM 에서 해제(개인판 기본 켬)
+    local_auto_unload: bool = True
 
     data_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data")
     artifact_dir: Path = field(default_factory=lambda: PROJECT_ROOT)
@@ -258,6 +260,9 @@ class Settings:
             or "http://localhost:11434/v1",
             local_api_key=_env("SHORTLY_LOCAL_API_KEY", "ollama") or "ollama",
             local_no_think=_env("SHORTLY_LOCAL_NO_THINK", "1") not in ("0", "false", "False"),
+            local_auto_unload=_env(
+                "SHORTLY_LOCAL_AUTO_UNLOAD", "1"
+            ) not in ("0", "false", "False", ""),
             data_dir=Path(data_dir) if data_dir else PROJECT_ROOT / "data",
             artifact_dir=policy.artifact_root,
             log_dir=policy.log_root,
@@ -342,6 +347,7 @@ SAVABLE_KEYS = {
     "TYPECAST_API_KEY",
     "SHORTLY_LOCAL_BASE_URL",
     "SHORTLY_LOCAL_API_KEY",
+    "SHORTLY_LOCAL_AUTO_UNLOAD",
     "SHORTLY_MAX_SHORTS",
     "SHORTLY_MIN_VIEWS",
     "SHORTLY_TTS_VOICE_ID",

@@ -12,6 +12,20 @@ from ...llm.registry import (
 from .local_llm import LOCAL_PROVIDER_NAMES, make_local_client
 
 
+def _local_factory(provider: str):
+    runtime = provider if provider != "local" else "auto"
+
+    def create(settings, text_model, vision_model):
+        return make_local_client(
+            settings,
+            text_model,
+            vision_model,
+            runtime=runtime,
+        )
+
+    return create
+
+
 def provider_registry() -> ProviderRegistry:
     registrations = [
         ProviderRegistration("gemini", _gemini),
@@ -19,7 +33,7 @@ def provider_registry() -> ProviderRegistry:
         ProviderRegistration("anthropic", _anthropic),
     ]
     registrations.extend(
-        ProviderRegistration(name, make_local_client, local=True)
+        ProviderRegistration(name, _local_factory(name), local=True)
         for name in LOCAL_PROVIDER_NAMES
     )
     return ProviderRegistry(registrations)

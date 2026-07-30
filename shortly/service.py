@@ -21,7 +21,12 @@ from .generate.guide import build_guide, render_guide_markdown
 from .generate.image_reco import recommend_cuts
 from .generate.research import research_topic
 from .generate.factcheck import factcheck_script
-from .generate.script_gen import generate_script, revise_script
+from .generate.script_gen import (
+    extract_subject_anchors,
+    generate_script,
+    revise_script,
+    script_preserves_subject,
+)
 from .ingest.youtube import channel_paths, ingest_channel, load_manifest
 from .llm import get_llm
 from .sfx.catalog import build_catalog, load_catalog
@@ -572,6 +577,7 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
         "is_script": is_script,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "title": guide.get("title"),
+        "subject_anchors": extract_subject_anchors(script, text),
         "research_used": bool(research and (research.get("results")
                                             or research.get("hard_facts"))),
         "factcheck_used": bool(factcheck_meta and not factcheck_meta.get("skipped")),
@@ -640,6 +646,31 @@ def revise_guide(channel_input: str, name: str, instruction: str,
         return {"ok": False,
                 "reason": "원본 대본(script.json)을 읽을 수 없어 수정할 수 없습니다."}
     original_request = read_json(target / "request.json", default={}) or {}
+    root_input_text = str(
+        original_request.get("original_input_text")
+        or original_request.get("input_text")
+        or ""
+    ).strip()
+    root_input_type = str(
+        original_request.get("original_input_type")
+        or original_request.get("input_type")
+        or ""
+    ).strip()
+    stored_subject_anchors = original_request.get("subject_anchors")
+    subject_anchors = (
+        [
+            str(value).strip()
+            for value in stored_subject_anchors
+            if str(value).strip()
+        ]
+        if isinstance(stored_subject_anchors, list)
+        else []
+    )
+    if not subject_anchors:
+        subject_anchors = extract_subject_anchors(
+            original_script,
+            root_input_text,
+        )
 
     profile = get_profile(channel_input, settings)
     if profile is None:
@@ -653,32 +684,59 @@ def revise_guide(channel_input: str, name: str, instruction: str,
     research = None
     if getattr(settings, "research_enabled", True):
         progress("웹 조사 중...", None, None)
+        subject_prefix = " ".join(subject_anchors)
         seed = "\n".join(x for x in [
+            subject_prefix,
+            root_input_text[:1200],
             str(original_script.get("title") or ""),
             str(original_script.get("hook") or ""),
-            str(original_request.get("input_text") or "")[:800],
+            " ".join(
+                str(segment.get("text") or "")
+                for segment in original_script.get("segments") or []
+                if isinstance(segment, dict)
+            )[:1600],
             instruction,
         ] if x).strip()
         research = research_topic(
             seed, llm=llm,
             max_results=getattr(settings, "research_max_results", 8),
             max_queries=getattr(settings, "research_max_queries", 4),
+            subject_anchors=subject_anchors,
         )
         n = len((research or {}).get("results") or [])
         progress(f"웹 조사 완료 ({n}건)", None, None)
 
     progress(f"대본 수정 중... (모델: {llm.text_model})", None, None)
     script = revise_script(
-        llm, profile, original_script, instruction, research=research)
+        llm,
+        profile,
+        original_script,
+        instruction,
+        research=research,
+        subject_anchors=subject_anchors,
+    )
     if script.get("_source") in ("revise_failed", "unavailable"):
         return {"ok": False,
                 "reason": "대본 수정에 실패했습니다. 잠시 후 다시 시도하거나 요청을 바꿔보세요."}
+    if not script_preserves_subject(script, subject_anchors):
+        return {
+            "ok": False,
+            "reason": (
+                "수정 결과가 원본 회사·제품을 다른 주체로 바꾸려 해 저장하지 "
+                "않았습니다. 원본 가이드와 수정 요청을 확인한 뒤 다시 시도하세요."
+            ),
+            "subject_guard": {
+                "anchors": subject_anchors,
+                "stage": "revision",
+            },
+        }
 
     factcheck_meta = None
     if getattr(settings, "factcheck_enabled", True):
         progress("팩트체크 중 (시점·주체·수치 범위)...", None, None)
         seed = "\n".join(x for x in [
-            str(original_request.get("input_text") or ""),
+            " ".join(subject_anchors),
+            root_input_text,
             str(script.get("title") or ""),
             instruction,
         ] if x).strip()
@@ -692,10 +750,18 @@ def revise_guide(channel_input: str, name: str, instruction: str,
             "extra_results": fc.get("extra_results") or [],
         }
         if fc.get("changed") and fc.get("script"):
-            script = fc["script"]
-            progress(
-                f"팩트체크 수정 반영 ({len(factcheck_meta['fixes'])}건)",
-                None, None)
+            if script_preserves_subject(fc["script"], subject_anchors):
+                script = fc["script"]
+                progress(
+                    f"팩트체크 수정 반영 ({len(factcheck_meta['fixes'])}건)",
+                    None, None)
+            else:
+                factcheck_meta["changed"] = False
+                factcheck_meta["subject_change_rejected"] = True
+                factcheck_meta["issues"].append(
+                    "팩트체크 결과가 원본 주체를 제거해 수정 반영을 거부했습니다."
+                )
+                progress("팩트체크 주체 변경 거부 (수정 전 대본 유지)", None, None)
         else:
             progress("팩트체크 완료 (수정 없음)", None, None)
 
@@ -719,8 +785,9 @@ def revise_guide(channel_input: str, name: str, instruction: str,
         "title": guide.get("title"),
         "source_guide_name": name,
         "revision_instruction": instruction,
-        "original_input_text": original_request.get("input_text"),
-        "original_input_type": original_request.get("input_type"),
+        "original_input_text": root_input_text,
+        "original_input_type": root_input_type,
+        "subject_anchors": subject_anchors,
         "research_used": bool(research and (research.get("results")
                                             or research.get("hard_facts"))),
         "factcheck_used": bool(factcheck_meta and not factcheck_meta.get("skipped")),

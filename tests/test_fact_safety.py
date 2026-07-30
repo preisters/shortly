@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from shortly.generate.factcheck import factcheck_script
-from shortly.generate.research import distill_research
+from shortly.generate.research import distill_research, research_topic
 from shortly.llm.base import LLMClient
 
 
@@ -116,6 +116,42 @@ class FactSafetyTests(unittest.TestCase):
 
         self.assertTrue(
             any("절대 기준연도" in issue for issue in result["issues"])
+        )
+
+    def test_revision_research_excludes_similar_story_for_another_subject(
+        self,
+    ) -> None:
+        raw = {
+            "queries": ["성경김 독도 일본 수출"],
+            "results": [
+                {
+                    "title": "독도 표기 고수한 성경김",
+                    "snippet": "지도표 성경김은 포장지 표기를 유지했다.",
+                    "url": "https://example.test/article",
+                },
+                {
+                    "title": "독도 못 빼 일본 포기한 쌀과자",
+                    "snippet": "전남 장성 유아용 쌀과자 업체 이야기다.",
+                    "url": "https://example.test/rice-snack",
+                },
+            ],
+            "backend": "fixture",
+        }
+        with patch(
+            "shortly.generate.research.collect_raw",
+            return_value=raw,
+        ):
+            research = research_topic(
+                "성경김 독도 일본 수출",
+                llm=_ResearchLlm(),
+                subject_anchors=["성경김"],
+            )
+
+        self.assertEqual(len(research["results"]), 1)
+        self.assertIn("성경김", research["results"][0]["title"])
+        self.assertEqual(
+            research["subject_filter"]["excluded_results"],
+            1,
         )
 
 

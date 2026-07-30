@@ -81,6 +81,25 @@ _SCHEMA = (
     '"hook": string(title과 동일·[훅 예시] 패턴), '
     '"segments": [{"index": number, "text": string, "intent": string}]}'
 )
+_SUBJECT_SUFFIXES = (
+    "식품",
+    "푸드",
+    "제과",
+    "전자",
+    "그룹",
+    "브랜드",
+    "과자",
+    "김",
+    "떡",
+    "빵",
+)
+_SUBJECT_STOP_TERMS = {
+    "대기업",
+    "중소기업",
+    "식품회사",
+    "한국식품",
+    "유아용쌀과자",
+}
 
 _FLOW_FACT_REMINDER = (
     "[전개·재료 재확인]\n"
@@ -224,6 +243,92 @@ def _finalize_llm_script(data: Dict) -> Dict:
     return data
 
 
+def extract_subject_anchors(
+    script: Dict,
+    source_text: str = "",
+) -> List[str]:
+    """Extract conservative product/company anchors that revisions must retain."""
+
+    script_text = " ".join(
+        [
+            str(script.get("title") or ""),
+            str(script.get("hook") or ""),
+            *[
+                str(segment.get("text") or "")
+                for segment in script.get("segments") or []
+                if isinstance(segment, dict)
+            ],
+        ]
+    )
+    combined = f"{source_text} {script_text}"
+    compact = re.sub(r"\s+", "", combined)
+    candidates: Dict[str, int] = {}
+    suffix_pattern = "|".join(
+        re.escape(value) for value in _SUBJECT_SUFFIXES
+    )
+    for match in re.finditer(
+        rf"[A-Za-z가-힣0-9·]{{2,20}}?(?:{suffix_pattern})",
+        combined,
+    ):
+        value = match.group(0).strip()
+        normalized = re.sub(r"\s+", "", value)
+        if (
+            len(normalized) < 3
+            or normalized in _SUBJECT_STOP_TERMS
+        ):
+            continue
+        count = compact.count(normalized)
+        if count >= 2 or normalized in re.sub(r"\s+", "", source_text):
+            candidates[normalized] = max(candidates.get(normalized, 0), count)
+
+    for match in re.finditer(
+        r"(?:그건|그\s*제품은|제품은|주인공은|정체는)\s*바로\s+"
+        r"(.{2,32}?)(?:인데|이라고|였|임|$)",
+        script_text,
+    ):
+        phrase = re.sub(
+            r"^(?:우리가\s+흔히\s+먹는|그|이)\s+",
+            "",
+            match.group(1).strip(),
+        )
+        phrase = re.sub(r"\s+", " ", phrase).strip(" ,.'\"")
+        if len(phrase.replace(" ", "")) >= 3:
+            candidates[phrase] = max(candidates.get(phrase, 0), 3)
+
+    return [
+        value
+        for value, _ in sorted(
+            candidates.items(),
+            key=lambda item: (-item[1], -len(item[0]), item[0]),
+        )[:5]
+    ]
+
+
+def script_preserves_subject(script: Dict, subject_anchors: List[str]) -> bool:
+    """Return False only when confident subject anchors all disappeared."""
+
+    anchors = [
+        re.sub(r"\s+", "", str(value or "")).casefold()
+        for value in subject_anchors
+        if str(value or "").strip()
+    ]
+    if not anchors:
+        return True
+    blob = " ".join(
+        [
+            str(script.get("title") or ""),
+            str(script.get("hook") or ""),
+            *[
+                str(segment.get("text") or "")
+                for segment in script.get("segments") or []
+                if isinstance(segment, dict)
+            ],
+        ]
+    )
+    compact = re.sub(r"\s+", "", blob).casefold()
+    return any(anchor in compact for anchor in anchors)
+
+
 def generate_script(llm: LLMClient, profile: Dict, text: str, is_script: bool = False,
                     research: Optional[Dict] = None) -> Dict:
     """채널 스타일을 반영한 대본을 생성/보정합니다."""
@@ -259,8 +364,14 @@ def generate_script(llm: LLMClient, profile: Dict, text: str, is_script: bool = 
     return _heuristic_script(profile, text, is_script)
 
 
-def revise_script(llm: LLMClient, profile: Dict, original_script: Dict,
-                  instruction: str, research: Optional[Dict] = None) -> Dict:
+def revise_script(
+    llm: LLMClient,
+    profile: Dict,
+    original_script: Dict,
+    instruction: str,
+    research: Optional[Dict] = None,
+    subject_anchors: Optional[List[str]] = None,
+) -> Dict:
     """완성된 대본을 사용자의 수정 요청 방향대로 다시 다듬습니다."""
     original_segments = original_script.get("segments", []) or []
     original_text = "\n".join(
@@ -273,10 +384,14 @@ def revise_script(llm: LLMClient, profile: Dict, original_script: Dict,
         return fallback
 
     research_txt = _research_block(research)
+    subject_lock = ", ".join(subject_anchors or []) or "(자동 추출 없음)"
     task = (
         "아래 '기존 대본'을 사용자의 '수정 요청' 방향대로 다시 써라. "
         "채널 말투·어미·분량 규칙은 그대로 유지하고, 요청에 없는 부분은 최대한 원본의 "
         "내용과 흐름을 보존한다. "
+        f"원본 주체 잠금: [{subject_lock}]. 이 회사·제품·인물을 다른 주체로 절대 "
+        "교체하지 마라. 웹 조사에 비슷한 사건의 다른 회사나 제품이 섞여도 해당 내용은 "
+        "무시한다. 수정 요청이 주체 교체를 명시하지 않는 한 잠금 주체를 제목과 본문에 유지한다. "
         "title/hook 을 건드리면 [훅 예시] 패턴의 짧고 강한 선언형 한 줄로 맞추고 "
         "title 과 hook 은 동일하게 유지한다. "
         "웹 조사 hard_facts 밖 사건·조건·인용·행위주체 변경을 새로 넣지 마라. "

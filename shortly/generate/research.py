@@ -375,6 +375,7 @@ def distill_research(llm: Optional[LLMClient], topic: str, raw: Dict) -> Dict:
         "queries": raw.get("queries") or [],
         "results": raw.get("results") or [],
         "backend": raw.get("backend"),
+        "subject_filter": raw.get("subject_filter"),
         "quantified_facts": [],
         "hard_facts": [],
         "drama_beats": [],
@@ -540,8 +541,13 @@ def distill_research(llm: Optional[LLMClient], topic: str, raw: Dict) -> Dict:
     return base
 
 
-def research_topic(topic: str, llm: Optional[LLMClient] = None,
-                   max_results: int = 8, max_queries: int = 4) -> Dict:
+def research_topic(
+    topic: str,
+    llm: Optional[LLMClient] = None,
+    max_results: int = 8,
+    max_queries: int = 4,
+    subject_anchors: Optional[List[str]] = None,
+) -> Dict:
     """주제 웹 조사 + (가능하면) LLM 요약. 실패해도 빈 구조 반환."""
     topic = (topic or "").strip()
     if not topic:
@@ -554,6 +560,33 @@ def research_topic(topic: str, llm: Optional[LLMClient] = None,
         }
     log.info("웹 조사 시작: %s", topic[:60])
     raw = collect_raw(topic, max_results=max_results, max_queries=max_queries)
+    anchors = [
+        re.sub(r"\s+", "", str(value or "")).casefold()
+        for value in subject_anchors or []
+        if str(value or "").strip()
+    ]
+    if anchors:
+        original_results = list(raw.get("results") or [])
+        filtered_results = []
+        for row in original_results:
+            blob = re.sub(
+                r"\s+",
+                "",
+                f"{row.get('title', '')} {row.get('snippet', '')}",
+            ).casefold()
+            if any(anchor in blob for anchor in anchors):
+                filtered_results.append(row)
+        raw["results"] = filtered_results
+        raw["subject_filter"] = {
+            "anchors": list(subject_anchors or []),
+            "excluded_results": len(original_results) - len(filtered_results),
+        }
+        log.info(
+            "웹 조사 주체 필터: anchors=%s kept=%d excluded=%d",
+            subject_anchors,
+            len(filtered_results),
+            len(original_results) - len(filtered_results),
+        )
     log.info("웹 조사 결과 %d건 (backend=%s)",
              len(raw.get("results") or []), raw.get("backend"))
     return distill_research(llm, topic, raw)

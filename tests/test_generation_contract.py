@@ -5,7 +5,11 @@ import unittest
 from support import load_fixture
 
 from shortly.generate.guide import build_guide
-from shortly.generate.script_gen import generate_script
+from shortly.generate.script_gen import (
+    extract_subject_anchors,
+    generate_script,
+    script_preserves_subject,
+)
 from shortly.llm.base import LLMClient
 
 
@@ -63,6 +67,42 @@ class GenerationContractTests(unittest.TestCase):
             self.assertIsInstance(segment["sfx"], list)
             previous_end = segment["end_sec"]
         self.assertEqual(guide["total_duration_sec"], previous_end)
+
+    def test_revision_subject_anchor_rejects_similar_company_substitution(
+        self,
+    ) -> None:
+        original = {
+            "title": "일본 시장 통째로 버린 김",
+            "hook": "일본 시장 통째로 버린 김",
+            "segments": [
+                {
+                    "index": 1,
+                    "text": "그건 바로 지도표 성경김이라고",
+                },
+                {
+                    "index": 2,
+                    "text": "결국 성경김은 독도 표기를 고수했다고",
+                },
+            ],
+        }
+        anchors = extract_subject_anchors(
+            original,
+            "성경김이 독도 때문에 일본 시장을 포기한 이야기",
+        )
+        substituted = {
+            "title": "일본 시장 통째로 버린 쌀과자",
+            "hook": "일본 시장 통째로 버린 쌀과자",
+            "segments": [
+                {
+                    "index": 1,
+                    "text": "그건 바로 전남 장성의 유아용 쌀과자라고",
+                }
+            ],
+        }
+
+        self.assertIn("성경김", anchors)
+        self.assertTrue(script_preserves_subject(original, anchors))
+        self.assertFalse(script_preserves_subject(substituted, anchors))
 
 
 if __name__ == "__main__":

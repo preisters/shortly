@@ -151,7 +151,7 @@ python -m shortly build-installer
 
 `build-installer` 는 **Python·ffmpeg 를 폴더 안에 넣습니다.** 팀원은 따로 설치할 필요 없습니다.
 
-- 학습 AI: Claude Sonnet 5 고정 / 생성 AI: Claude Opus 4.8 고정
+- 학습 AI: Claude Sonnet 5 고정 / 생성 AI: Claude Opus 5 고정
 - 설정: Anthropic API 키만 입력
 - 효과음 기능 없음
 - 결과물:

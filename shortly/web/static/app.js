@@ -92,7 +92,7 @@ function applyPortableUI(s) {
       $("portable-learn-model").textContent = s.portable_analysis_model || s.text_model || "claude-sonnet-5";
     }
     if ($("portable-gen-model")) {
-      $("portable-gen-model").textContent = s.portable_generation_model || s.gen_effective_model || "claude-opus-4-8";
+      $("portable-gen-model").textContent = s.portable_generation_model || s.gen_effective_model || "claude-opus-5";
     }
     const key = $("set-key-portable");
     if (key) {

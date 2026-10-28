@@ -16,7 +16,7 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Dict, List, Optional
 
-from ..llm.base import LLMClient, LLMError, parse_json_loose
+from ..llm.base import LLMClient, LLMError, LLMQuotaExceeded, parse_json_loose
 from ..utils import log
 
 
@@ -202,6 +202,8 @@ def extract_layout_qwen(keyframes: List[str], llm: LLMClient,
             raw = llm.describe_image(small, _QWEN_LAYOUT_PROMPT, temperature=0.1,
                                      max_tokens=500)
             data = parse_json_loose(raw)
+        except LLMQuotaExceeded:
+            raise
         except (LLMError, ValueError) as exc:
             log.info("Qwen 레이아웃 추출 실패(%s): %s", p.name, exc)
             data = None

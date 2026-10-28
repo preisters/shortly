@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from ..llm.base import LLMClient, LLMError
+from ..llm.base import LLMClient, LLMError, LLMQuotaExceeded
 from ..utils import log
 
 _FRAME_PROMPT = (
@@ -26,6 +26,8 @@ def describe_keyframes(llm: LLMClient, keyframes: List[str],
             continue
         try:
             desc = llm.describe_image(p, _FRAME_PROMPT)
+        except LLMQuotaExceeded:
+            raise
         except LLMError as exc:
             log.info("프레임 묘사 실패: %s", exc)
             continue
@@ -112,6 +114,8 @@ def analyze_short(llm: LLMClient, transcript: Dict, cv_result: Dict,
             data["_source"] = "llm"
             data.setdefault("dialogue_metrics", metrics)
             return data
+    except LLMQuotaExceeded:
+        raise
     except LLMError as exc:
         log.info("쇼츠 LLM 분석 실패, 휴리스틱 사용: %s", exc)
     return _heuristic_short_analysis(transcript, cv_result)

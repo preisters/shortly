@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 
-from .base import LLMClient, LLMError, LLMUnavailable
+from .base import LLMClient, LLMUnavailable, normalize_provider_error
 
 
 class AnthropicClient(LLMClient):
@@ -48,8 +48,8 @@ class AnthropicClient(LLMClient):
                 try:
                     return client.messages.create(**kwargs)
                 except Exception as exc2:  # noqa: BLE001
-                    raise LLMError(f"Anthropic 호출 실패: {exc2}") from exc2
-            raise LLMError(f"Anthropic 호출 실패: {exc}") from exc
+                    raise normalize_provider_error("anthropic", exc2) from exc2
+            raise normalize_provider_error("anthropic", exc) from exc
 
     def complete_text(self, system: str, user: str, temperature: float = 0.7,
                       max_tokens: int = 4096) -> str:

@@ -89,10 +89,12 @@ Pixabay와 Pexels도 함께 검색할 수 있습니다. 검색 결과 카드에�
 - `SHORTLY_TEXT_MODEL`: 텍스트 모델 (예: Ollama `qwen3.6:27b`)
 - `SHORTLY_VISION_MODEL`: 비전 모델 (예: Ollama `qwen3-vl:8b-instruct-q8_0`)
 - `SHORTLY_LOCAL_NO_THINK`: Qwen3 등 reasoning 모델의 thinking 자동 끔 (기본 `1`)
+- `SHORTLY_LOCAL_AUTO_START`: 로컬 LM Studio가 꺼져 있으면 `lms` CLI로 서버와 요청 모델 자동 준비 (기본 `1`)
 - `SHORTLY_LOCAL_AUTO_UNLOAD`: 호출 직후 모델 RAM/VRAM 자동 해제 (기본 `1`)
 
-자동 해제는 Ollama와 LM Studio를 지원합니다. 메모리 부족을 줄이는 대신 다음 로컬
-호출에서는 모델을 다시 로드하므로 시작 시간이 늘어날 수 있습니다. `llama.cpp`의
+자동 시작은 `localhost`의 LM Studio에만 적용됩니다. 자동 해제는 Ollama와 LM Studio를
+지원합니다. 메모리 부족을 줄이는 대신 다음 로컬 호출에서는 모델을 다시 로드하므로
+시작 시간이 늘어날 수 있습니다. `llama.cpp`의
 OpenAI 호환 서버는 표준 언로드 API가 없어 서버 프로세스를 임의 종료하지 않습니다.
 
 Ollama 예시:

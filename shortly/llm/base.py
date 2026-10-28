@@ -20,6 +20,81 @@ class LLMResponseParseError(LLMError):
     """The provider responded, but its text was not valid structured output."""
 
 
+class LLMQuotaExceeded(LLMError):
+    """상용 AI의 크레딧·결제 한도·사용 할당량이 부족한 오류."""
+
+    error_code = "commercial_ai_quota_exceeded"
+    retryable = False
+
+    def __init__(self, provider: str) -> None:
+        labels = {
+            "openai": "OpenAI",
+            "anthropic": "Anthropic",
+            "gemini": "Gemini",
+            "google": "Google",
+        }
+        self.provider = provider
+        label = labels.get(provider.lower(), provider or "상용 AI")
+        super().__init__(
+            f"{label} AI 토큰·크레딧 또는 사용 할당량이 부족합니다. "
+            "공급자 대시보드에서 잔액과 사용 한도를 확인한 뒤 다시 시도하세요."
+        )
+
+
+def _provider_error_text(exc: Exception) -> str:
+    """SDK마다 다른 오류 객체에서 분류에 필요한 공개 메타데이터만 모은다."""
+    values = [str(exc)]
+    for name in ("code", "type", "status", "status_code", "message", "body"):
+        value = getattr(exc, name, None)
+        if value not in (None, ""):
+            try:
+                values.append(json.dumps(value, ensure_ascii=False, default=str))
+            except (TypeError, ValueError):
+                values.append(str(value))
+    return " ".join(values).lower()[:6000]
+
+
+def is_provider_quota_exceeded(exc: Exception) -> bool:
+    """결제/할당량 부족을 일시적인 요청 속도 제한과 구분한다."""
+    text = _provider_error_text(exc)
+    markers = (
+        "insufficient_quota",
+        "insufficient quota",
+        "insufficient_credit",
+        "insufficient credit",
+        "credit balance is too low",
+        "purchase credits",
+        "billing_hard_limit",
+        "billing hard limit",
+        "billing limit",
+        "payment required",
+        "exceeded your current quota",
+        "quota exceeded",
+        "quota_exceeded",
+        "resource_exhausted",
+    )
+    return any(marker in text for marker in markers)
+
+
+def normalize_provider_error(
+    provider: str,
+    exc: Exception,
+    *,
+    operation: str = "호출",
+) -> LLMError:
+    """공급자 예외를 UI까지 안전하게 전달할 공통 LLM 오류로 변환한다."""
+    if is_provider_quota_exceeded(exc):
+        return LLMQuotaExceeded(provider)
+    labels = {
+        "openai": "OpenAI",
+        "anthropic": "Anthropic",
+        "gemini": "Gemini",
+        "google": "Google",
+    }
+    label = labels.get(provider.lower(), provider or "AI")
+    return LLMError(f"{label} {operation} 실패: {exc}")
+
+
 class LLMClient:
     """모든 제공자가 구현하는 공통 인터페이스.
 

@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, TYPE_CHECKING
 
-from ...llm.base import LLMClient
+from ...llm.base import LLMClient, LLMUnavailable
 from ...llm.openai_transport import OpenAICompatibleClient
 from .local_resources import LocalModelResourceManager
 
@@ -27,11 +27,13 @@ class AutoUnloadingLocalClient(OpenAICompatibleClient):
     def __init__(
         self,
         *args,
+        auto_start: bool = True,
         auto_unload: bool = True,
         runtime: str = "auto",
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+        self._auto_start = bool(auto_start and self._base_url)
         self._auto_unload = bool(auto_unload and self._base_url)
         self._resource_manager = (
             LocalModelResourceManager(
@@ -39,7 +41,7 @@ class AutoUnloadingLocalClient(OpenAICompatibleClient):
                 kwargs.get("api_key", args[0] if args else ""),
                 runtime=runtime,
             )
-            if self._auto_unload
+            if self._auto_start or self._auto_unload
             else None
         )
 
@@ -51,6 +53,13 @@ class AutoUnloadingLocalClient(OpenAICompatibleClient):
         manager = self._resource_manager
         if manager is None:
             return operation()
+        if self._auto_start:
+            try:
+                manager.ensure_ready(model)
+            except Exception as exc:
+                raise LLMUnavailable(
+                    "LM Studio 자동 시작 또는 모델 로드에 실패했습니다."
+                ) from exc
         key = (manager.origin, model)
         with _ACTIVE_LOCK:
             _ACTIVE_CALLS[key] = _ACTIVE_CALLS.get(key, 0) + 1
@@ -148,6 +157,7 @@ def make_local_client(
         base_url=settings.local_base_url,
         provider="local",
         no_think=settings.local_no_think,
+        auto_start=settings.local_auto_start,
         auto_unload=settings.local_auto_unload,
         runtime=runtime,
     )

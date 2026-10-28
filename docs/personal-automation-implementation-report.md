@@ -77,7 +77,8 @@ python -m shortly.apps.personal.launcher
 개인 자동화 설정은 `.env.example`의 `SHORTLY_IMAGE_MODEL`,
 `SHORTLY_VIDEO_MODEL`, `SHORTLY_*_BUDGET_*`,
 `SHORTLY_IMAGE_ESTIMATED_COST_USD`, `SHORTLY_VIDEO_ESTIMATED_COST_USD`,
-`SHORTLY_MAX_ASSET_REGENERATIONS`, `SHORTLY_ASSET_CANDIDATES`를 사용한다.
+`SHORTLY_ASSET_CANDIDATES`를 사용한다. 컷별 재생성 횟수는 제한하지 않으며,
+각 생성 전 사용자 승인과 영상별·일별·월별 예산 검증으로 비용을 보호한다.
 키 값은 SQLite나 manifest에 기록하지 않는다.
 
 ## 4. 검증 결과

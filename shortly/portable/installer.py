@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
+from .. import __version__
 from ..config import (
     PORTABLE_ANALYSIS_MODEL,
     PORTABLE_GENERATION_MODEL,
@@ -156,7 +157,11 @@ USB 가 "사용 중"이라 안 빠지면 "Shortly-종료.bat" 을 실행하세�
     (out_dir / "사용법.txt").write_text(text, encoding="utf-8")
 
 
-def _write_inno_iss(app_dir: Path, iss_path: Path, version: str = "0.1.0") -> None:
+def _write_inno_iss(
+    app_dir: Path,
+    iss_path: Path,
+    version: str = __version__,
+) -> None:
     app_dir_str = str(app_dir).replace("/", "\\")
     out_base = str(iss_path.parent).replace("/", "\\")
     # Inno 는 {app} 문법을 쓰므로 Python format 과 충돌 없게 치환만 사용

@@ -7,7 +7,7 @@ from collections import Counter
 from statistics import mean
 from typing import Dict, List, Optional
 
-from ..llm.base import LLMClient, LLMError
+from ..llm.base import LLMClient, LLMError, LLMQuotaExceeded
 from ..utils import log
 from .layout import aggregate_layout
 
@@ -265,6 +265,8 @@ def _synthesize_image_style(llm: LLMClient, common_types: List[List],
             data = llm.complete_json(system, user, max_tokens=2000)
             if isinstance(data, dict) and data.get("summary"):
                 return str(data["summary"])
+        except LLMQuotaExceeded:
+            raise
         except LLMError as exc:
             log.info("이미지 경향 요약 LLM 실패, 휴리스틱 사용: %s", exc)
     top = ", ".join(f"{t}" for t, _ in common_types[:3]) or "데이터 부족"
@@ -367,9 +369,13 @@ def _synthesize(llm: LLMClient, manifest: Dict, stats: Dict,
             "편집·기획·화법 스타일을 요약하고, 같은 느낌으로 만들기 위한 실전 레시피를 제시한다.\n"
             "중요: 자막/음성 인식 예시는 잘리거나 오인식될 수 있다. 오류 문법, 미완결 문장, "
             "쉼표 연쇄를 채널 개성으로 오판하지 마라. 빈도가 높다는 이유만으로 연결어를 필수 "
-            "체크리스트로 만들지 마라. 채널 고유의 훅·톤·어미는 보존하되, 이야기의 인과·정보 "
+            "체크리스트로 만들지 마라. 채널 고유의 훅·톤·어미는 보존하되, 기존 영상에서 자주 "
+            "보인 사건 배열·문장 골격·비트 수를 채널 고유 구조로 정의하지 마라. 이야기의 인과·정보 "
             "공개 순서·가독성·사실성은 모든 채널에 공통인 상위 품질 기준으로 둔다. "
             "과장은 표현에만 허용하고 사건·수치·인과의 거짓 과장은 금지한다.\n"
+            "'하필'처럼 원치 않은 선택·불운한 우연을 뜻하는 단어가 일부 예시에 보이더라도 범용 "
+            "반전 연결어나 채널 필수 어휘로 승격하지 마라. 의미가 맞는 부정적 문맥에서만 관찰된 "
+            "표현으로 기록하고, do 규칙이나 반복 사용 지침에 넣지 마라.\n"
             "가장 중요: [실제 대사 예시]의 말투와 문장 끝맺음(어미)을 그대로 관찰해 'voice' 필드에 "
             "구체적으로 기술하라. 이 채널은 '썰 풀어주는' 화법일 수 있으니, 실제로 쓰는 어미"
             "(예: '~다고 함', '~했는데', '~다는데', '~라고')를 예시와 함께 명시하라. "
@@ -398,8 +404,9 @@ def _synthesize(llm: LLMClient, manifest: Dict, stats: Dict,
             "dialogue_spec 에는 위 정량지표를 근거로 '대사 총 몇 자, 문장 몇 개, 문장당 몇 자, "
             "말속도 몇 자/초, 훅 몇 자 내외'처럼 재현 가능한 구체 수치를 반드시 담아라.\n"
             "voice 에는 [실제 대사 예시]에서 관찰되는 말투와 어미를 반드시 실제 예시와 함께 적어라.\n"
-            "story 에는 각 비트가 새 정보를 하나씩 추가하고 훅을 결말에서 회수하는 방식을 적어라. "
-            "do/avoid에는 특정 연결어 사용 횟수를 넣지 말고 구조적 품질 기준을 포함하라.\n"
+            "story 에는 관찰된 경향만 적고 재사용할 고정 단계나 필수 슬롯으로 표현하지 마라. "
+            "do/avoid에는 특정 연결어 사용 횟수·사건 순서·고정 비트 수를 넣지 말고, 훅·말투·톤처럼 "
+            "다른 소재에도 안전하게 옮길 수 있는 표면 스타일만 포함하라.\n"
             f"스키마: {schema}"
         )
         try:
@@ -407,6 +414,8 @@ def _synthesize(llm: LLMClient, manifest: Dict, stats: Dict,
             data = llm.complete_json(system, user, max_tokens=7000)
             if isinstance(data, dict) and "style_summary" in data:
                 return data.get("style_summary", ""), data.get("recipe", {})
+        except LLMQuotaExceeded:
+            raise
         except LLMError as exc:
             log.info("스타일 종합 LLM 실패, 휴리스틱 사용: %s", exc)
 
@@ -431,8 +440,8 @@ def _synthesize(llm: LLMClient, manifest: Dict, stats: Dict,
             f"예시: {samples[0] if samples else ''}"
         ),
         "story": (
-            "훅→정체 공개→구체적 상황→선택/대치→대가→반전/보상 순으로 "
-            "새 정보를 하나씩 공개하고 마지막에 훅을 회수."
+            "소재마다 가장 강한 인과 축을 고르고 새 정보를 하나씩 공개해 마지막에 훅을 회수. "
+            "정체·상황·대치·선택·대가·보상은 필요할 때만 사용하며 고정 순서로 강제하지 않음."
         ),
         "dialogue_spec": (
             f"대사 총 {ccn.get('min', 0)}~{ccn.get('max', 0)}자(평균 {ccn.get('avg', 0)}자), "

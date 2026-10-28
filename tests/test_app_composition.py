@@ -38,9 +38,17 @@ class _FakeService:
         is_script=False,
         settings=None,
         progress=None,
+        research_focus="",
+        required_content="",
     ):
         self.guide_called.set()
-        return {"ok": True, "channel": channel, "text": text}
+        return {
+            "ok": True,
+            "channel": channel,
+            "text": text,
+            "research_focus": research_focus,
+            "required_content": required_content,
+        }
 
 
 @unittest.skipIf(
@@ -211,6 +219,8 @@ class AppCompositionTests(unittest.TestCase):
                     legacy_app.GuideRequest(
                         channel="@fixture",
                         text="fixture topic",
+                        research_focus="검증할 관습",
+                        required_content="반드시 넣을 결말",
                     )
                 )
 
@@ -227,6 +237,8 @@ class AppCompositionTests(unittest.TestCase):
                     "ok": True,
                     "channel": "@fixture",
                     "text": "fixture topic",
+                    "research_focus": "검증할 관습",
+                    "required_content": "반드시 넣을 결말",
                 },
             )
         finally:

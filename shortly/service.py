@@ -18,11 +18,15 @@ from .generate.capcut_export import (export_capcut_draft,
                                       export_to_capcut_project,
                                       export_via_template)
 from .generate.guide import build_guide, render_guide_markdown
+from .generate.editorial import duration_check, preserve_title, review_story
 from .generate.image_reco import recommend_cuts
 from .generate.research import research_topic
 from .generate.factcheck import apply_factcheck_repairs, factcheck_script
 from .generate.script_gen import (
+    analyze_required_content_coverage,
+    analyze_narrative_coverage,
     analyze_story_flow,
+    extract_explicit_subject_anchors,
     extract_subject_anchors,
     generate_script,
     polish_story_flow,
@@ -30,7 +34,7 @@ from .generate.script_gen import (
     script_preserves_subject,
 )
 from .ingest.youtube import channel_paths, ingest_channel, load_manifest
-from .llm import get_llm
+from .llm import LLMQuotaExceeded, get_llm
 from .sfx.catalog import build_catalog, load_catalog
 from .sfx.fingerprint import FingerprintIndex
 from .utils import log, read_json, slugify, write_json
@@ -54,20 +58,66 @@ def _finalize_story_quality(
     research: Optional[Dict],
     *,
     instruction: str = "",
+    source_text: str = "",
+    required_content: str = "",
 ) -> tuple[Dict, Dict]:
     """Run a final flow gate after factcheck and record evidence quality."""
 
-    before = analyze_story_flow(script)
+    script = preserve_title(script, source_text, instruction)
+    timing = duration_check(script, profile, source_text, instruction)
+    before = [*analyze_story_flow(script), *timing["issues"]]
     final_script = script
-    if before:
+    factcheck_changed = "+factcheck" in str(script.get("_source") or "")
+    if before or factcheck_changed:
         final_script = polish_story_flow(
             llm,
             profile,
             script,
             instruction=instruction,
             original_script=script if instruction else None,
+            force=factcheck_changed,
+            research=research,
+            source_text=source_text,
+            required_content=required_content,
+            review_issues=timing["issues"],
         )
+    editorial = review_story(llm, final_script, source_text, instruction, required_content, research)
+    editorial_before = dict(editorial)
+    # One bounded semantic repair only. No retry loop or automatic research/generation.
+    if editorial.get("status") == "completed" and editorial.get("issues"):
+        repaired = polish_story_flow(
+            llm, profile, final_script, instruction=instruction,
+            original_script=script if instruction else None,
+            source_text=source_text, required_content=required_content,
+            research=research, review_issues=editorial["issues"],
+        )
+        changed = _script_changed(final_script, repaired)
+        final_script = repaired
+        if changed:
+            editorial = review_story(llm, final_script, source_text, instruction, required_content, research)
+    timing = duration_check(final_script, profile, source_text, instruction)
     after = analyze_story_flow(final_script)
+    narrative_issues = analyze_narrative_coverage(
+        final_script,
+        source_text or instruction,
+    )
+    required_coverage = analyze_required_content_coverage(
+        final_script,
+        required_content,
+        research,
+    )
+    required_issues = [
+        *[
+            f"필수 포함 내용의 근거를 확보하지 못함: {item}"
+            for item in required_coverage["unsupported"]
+        ],
+        *[
+            f"검증됐지만 대본에서 빠진 필수 내용: {item}"
+            for item in required_coverage["missing"]
+        ],
+    ]
+    after = list(dict.fromkeys([*after, *narrative_issues, *required_issues,
+                               *timing["issues"], *editorial.get("issues", [])]))
     tiers: Dict[str, int] = {}
     for result in (research or {}).get("results") or []:
         if not isinstance(result, dict):
@@ -85,11 +135,21 @@ def _finalize_story_quality(
     else:
         evidence_status = "thin"
     metadata = {
+        "editorial_review": editorial,
+        "editorial_review_before_repair": editorial_before,
+        "duration": timing,
         "story_flow": {
             "issues_before_final_pass": before,
             "issues_after_final_pass": after,
             "changed": _script_changed(script, final_script),
             "rejected": final_script.get("_flow_rejected"),
+            "trigger": (
+                "detected_issue"
+                if before
+                else "factcheck_language_review"
+                if factcheck_changed
+                else None
+            ),
         },
         "research_evidence": {
             "result_count": len((research or {}).get("results") or []),
@@ -102,8 +162,33 @@ def _finalize_story_quality(
             "thin": bool((research or {}).get("thin", not research)),
             "status": evidence_status,
         },
+        "required_content": required_coverage,
     }
+    metadata["passed"] = (
+        not bool(after)
+        and not bool(final_script.get("_flow_rejected"))
+        and evidence_status != "thin"
+        and required_coverage["passed"]
+        and str(final_script.get("_source") or "") != "heuristic"
+        and editorial.get("passed") is True
+    )
     return final_script, metadata
+
+
+def _apply_factcheck_quality(metadata: Dict, factcheck: Optional[Dict]) -> Dict:
+    """A failed factcheck must never be presented as an automatic quality pass."""
+
+    if not factcheck:
+        return metadata
+    failed = bool(factcheck.get("failed"))
+    metadata["factcheck"] = {
+        "failed": failed,
+        "issues": list(factcheck.get("issues") or []),
+        "application_rejected": factcheck.get("application_rejected"),
+    }
+    if failed or factcheck.get("application_rejected"):
+        metadata["passed"] = False
+    return metadata
 
 
 # --------------------------------------------------------------------------
@@ -256,6 +341,8 @@ def learn_channel(channel_input: str, settings: Optional[Settings] = None,
                                     analyze_images=(i <= 5))
             if res:
                 per_short.append(res)
+        except LLMQuotaExceeded:
+            raise
         except Exception as exc:  # noqa: BLE001
             log.warning("영상 분석 실패 (%s): %s", v.get("id"), exc)
 
@@ -570,7 +657,8 @@ def get_guide(channel_input: str, name: str,
 
 
 def generate_guide(channel_input: str, text: str, is_script: bool = False,
-                   settings: Optional[Settings] = None, progress: Progress = _noop) -> Dict:
+                   settings: Optional[Settings] = None, progress: Progress = _noop,
+                   research_focus: str = "", required_content: str = "") -> Dict:
     """학습된 채널 스타일로 대본→가이드→CapCut 초안을 생성합니다."""
     settings = settings or get_settings()
     profile = get_profile(channel_input, settings)
@@ -589,6 +677,8 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
             max_results=getattr(settings, "research_max_results", 8),
             max_queries=getattr(settings, "research_max_queries", 4),
             subject_anchors=initial_subject_anchors,
+            research_focus=research_focus,
+            required_content=required_content,
         )
         n = len((research or {}).get("results") or [])
         hf = len((research or {}).get("hard_facts") or [])
@@ -607,19 +697,22 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
 
     progress(f"대본 생성 중... (모델: {llm.text_model})", None, None)
     script = generate_script(
-        llm, profile, text, is_script=is_script, research=research)
+        llm, profile, text, is_script=is_script, research=research,
+        required_content=required_content)
 
     factcheck_meta = None
     if (not is_script) and getattr(settings, "factcheck_enabled", True):
         progress("팩트체크 중 (시점·주체·수치 범위)...", None, None)
         fc = factcheck_script(
-            llm, script, research=research, topic=text, force=True)
+            llm, script, research=research, topic=text, force=True,
+            required_content=required_content)
         factcheck_meta = {
             "changed": fc.get("changed"),
             "issues": fc.get("issues") or [],
             "fixes": fc.get("fixes") or [],
             "skipped": fc.get("skipped"),
             "extra_results": fc.get("extra_results") or [],
+            "failed": bool(fc.get("failed")),
         }
         if fc.get("changed") and fc.get("script"):
             repaired_script = apply_factcheck_repairs(
@@ -645,15 +738,22 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
     quality_meta: Dict = {}
     if not is_script:
         flow_issues = analyze_story_flow(script)
-        if flow_issues:
+        needs_language_review = bool(
+            flow_issues or "+factcheck" in str(script.get("_source") or "")
+        )
+        if needs_language_review:
             progress("최종 이야기 흐름 정리 중...", None, None)
+        progress("제목·이야기 전개·결말 의미 검수 중...", None, None)
         script, quality_meta = _finalize_story_quality(
             llm,
             profile,
             script,
             research,
+            source_text=text,
+            required_content=required_content,
         )
-        if flow_issues:
+        quality_meta = _apply_factcheck_quality(quality_meta, factcheck_meta)
+        if needs_language_review:
             remaining = quality_meta["story_flow"]["issues_after_final_pass"]
             progress(
                 (
@@ -669,17 +769,28 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
     guide = build_guide(profile, script)
     # 컷별 이미지/매체/효과 추천(학습된 image_style·editing_style 기반)
     guide = recommend_cuts(llm, profile, guide)
+    visual_status = guide.get("visual_recommendation") or {}
+    if visual_status.get("status") in ("partial", "fallback"):
+        failed = visual_status.get("failed_segment_indices") or []
+        progress(
+            "시각 추천 일부 실패 — 안전 폴백 적용 "
+            f"(재검토 필요 구간: {', '.join(str(item) for item in failed)})",
+            None,
+            None,
+        )
     guide_md = render_guide_markdown(guide)
 
     paths = channel_paths(channel_input, settings)
-    out_dir = paths.root / "outputs" / slugify(guide.get("title") or text[:30])
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = _reserve_output_dir(
+        paths.root / "outputs", slugify(guide.get("title") or text[:30]))
     # 입력 원문·모드·시각을 그대로 보존(주제/대본 이력 조회용)
     request_meta = {
         "channel_input": channel_input,
         "input_text": text,
         "input_type": "script" if is_script else "topic",
         "is_script": is_script,
+        "research_focus": research_focus.strip() if not is_script else "",
+        "required_content": required_content.strip() if not is_script else "",
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "title": guide.get("title"),
         "subject_anchors": extract_subject_anchors(script, text),
@@ -688,11 +799,7 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
         "factcheck_used": bool(factcheck_meta and not factcheck_meta.get("skipped")),
         "factcheck_changed": bool(factcheck_meta and factcheck_meta.get("changed")),
         "quality_gate_used": bool(quality_meta),
-        "quality_gate_passed": not bool(
-            (quality_meta.get("story_flow") or {}).get(
-                "issues_after_final_pass"
-            )
-        ),
+        "quality_gate_passed": bool(quality_meta.get("passed")),
     }
     write_json(out_dir / "request.json", request_meta)
     write_json(out_dir / "script.json", script)
@@ -724,6 +831,18 @@ def generate_guide(channel_input: str, text: str, is_script: bool = False,
     }
 
 
+def _reserve_output_dir(out_root: Path, base_slug: str) -> Path:
+    """Atomically reserve a new output even for concurrent same-title jobs."""
+    out_root.mkdir(parents=True, exist_ok=True)
+    while True:
+        candidate = _unique_output_dir(out_root, base_slug)
+        try:
+            candidate.mkdir(exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+
+
 def _unique_output_dir(out_root: Path, base_slug: str) -> Path:
     """outputs 하위에 겹치지 않는 새 폴더 경로를 만듭니다(원본 미덮어씀)."""
     base_slug = base_slug or "guide"
@@ -752,6 +871,8 @@ def _revision_lineage_context(
     root_input_text = ""
     root_input_type = ""
     subject_anchors: List[str] = []
+    research_focus = ""
+    required_content = ""
     research_results: List[Dict] = []
     seen_results = set()
 
@@ -763,6 +884,13 @@ def _revision_lineage_context(
         request = read_json(current / "request.json", default={}) or {}
         research = read_json(current / "research.json", default={}) or {}
         factcheck = read_json(current / "factcheck.json", default={}) or {}
+
+        stored_focus = str(request.get("research_focus") or "").strip()
+        if stored_focus:
+            research_focus = stored_focus
+        stored_required = str(request.get("required_content") or "").strip()
+        if stored_required:
+            required_content = stored_required
 
         stored_anchors = request.get("subject_anchors")
         if not subject_anchors and isinstance(stored_anchors, list):
@@ -816,6 +944,8 @@ def _revision_lineage_context(
         "root_input_type": root_input_type,
         "subject_anchors": subject_anchors,
         "research_results": research_results,
+        "research_focus": research_focus,
+        "required_content": required_content,
     }
 
 
@@ -857,7 +987,7 @@ def revise_guide(channel_input: str, name: str, instruction: str,
         lineage.get("subject_anchors")
         or original_request.get("subject_anchors")
     )
-    subject_anchors = (
+    stored_subject_anchors = (
         [
             str(value).strip()
             for value in stored_subject_anchors
@@ -866,6 +996,12 @@ def revise_guide(channel_input: str, name: str, instruction: str,
         if isinstance(stored_subject_anchors, list)
         else []
     )
+    # Older outputs may have locked a comparison/reference entity (for example
+    # Seonggyeong-gim) instead of the explicitly declared main company. Always
+    # let the root prompt repair that stale metadata before a new revision.
+    subject_anchors = extract_explicit_subject_anchors(root_input_text)
+    if not subject_anchors:
+        subject_anchors = stored_subject_anchors
     if not subject_anchors:
         subject_anchors = extract_subject_anchors(
             original_script,
@@ -887,7 +1023,7 @@ def revise_guide(channel_input: str, name: str, instruction: str,
         subject_prefix = " ".join(subject_anchors)
         seed = "\n".join(x for x in [
             subject_prefix,
-            root_input_text[:1200],
+            root_input_text,
             str(original_script.get("title") or ""),
             str(original_script.get("hook") or ""),
             " ".join(
@@ -903,6 +1039,8 @@ def revise_guide(channel_input: str, name: str, instruction: str,
             max_queries=getattr(settings, "research_max_queries", 4),
             subject_anchors=subject_anchors,
             seed_results=lineage.get("research_results") or [],
+            research_focus=str(lineage.get("research_focus") or ""),
+            required_content=str(lineage.get("required_content") or ""),
         )
         n = len((research or {}).get("results") or [])
         progress(f"웹 조사 완료 ({n}건)", None, None)
@@ -915,6 +1053,8 @@ def revise_guide(channel_input: str, name: str, instruction: str,
         instruction,
         research=research,
         subject_anchors=subject_anchors,
+        source_text=root_input_text,
+        required_content=str(lineage.get("required_content") or ""),
     )
     if script.get("_source") in ("revise_failed", "unavailable"):
         return {"ok": False,
@@ -948,6 +1088,7 @@ def revise_guide(channel_input: str, name: str, instruction: str,
             topic=seed,
             force=True,
             revision_instruction=instruction,
+            required_content=str(lineage.get("required_content") or ""),
         )
         factcheck_meta = {
             "changed": fc.get("changed"),
@@ -955,6 +1096,7 @@ def revise_guide(channel_input: str, name: str, instruction: str,
             "fixes": fc.get("fixes") or [],
             "skipped": fc.get("skipped"),
             "extra_results": fc.get("extra_results") or [],
+            "failed": bool(fc.get("failed")),
         }
         if fc.get("changed") and fc.get("script"):
             scoped_factcheck_script = apply_factcheck_repairs(
@@ -992,16 +1134,23 @@ def revise_guide(channel_input: str, name: str, instruction: str,
             progress("팩트체크 완료 (수정 없음)", None, None)
 
     flow_issues = analyze_story_flow(script)
-    if flow_issues:
+    needs_language_review = bool(
+        flow_issues or "+factcheck" in str(script.get("_source") or "")
+    )
+    if needs_language_review:
         progress("최종 이야기 흐름 정리 중...", None, None)
+    progress("제목·이야기 전개·결말 의미 검수 중...", None, None)
     script, quality_meta = _finalize_story_quality(
         llm,
         profile,
         script,
         research,
         instruction=instruction,
+        source_text=root_input_text,
+        required_content=str(lineage.get("required_content") or ""),
     )
-    if flow_issues:
+    quality_meta = _apply_factcheck_quality(quality_meta, factcheck_meta)
+    if needs_language_review:
         remaining = quality_meta["story_flow"]["issues_after_final_pass"]
         progress(
             (
@@ -1016,19 +1165,29 @@ def revise_guide(channel_input: str, name: str, instruction: str,
     progress("제작 가이드 재구성 중...", None, None)
     guide = build_guide(profile, script)
     guide = recommend_cuts(llm, profile, guide)
+    visual_status = guide.get("visual_recommendation") or {}
+    if visual_status.get("status") in ("partial", "fallback"):
+        failed = visual_status.get("failed_segment_indices") or []
+        progress(
+            "시각 추천 일부 실패 — 안전 폴백 적용 "
+            f"(재검토 필요 구간: {', '.join(str(item) for item in failed)})",
+            None,
+            None,
+        )
     guide_md = render_guide_markdown(guide)
 
     paths = channel_paths(channel_input, settings)
     out_root = paths.root / "outputs"
     out_root.mkdir(parents=True, exist_ok=True)
-    out_dir = _unique_output_dir(out_root, slugify(guide.get("title") or name))
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = _reserve_output_dir(out_root, slugify(guide.get("title") or name))
 
     request_meta = {
         "channel_input": channel_input,
         "input_text": instruction,
         "input_type": "revision",
         "is_script": False,
+        "research_focus": str(lineage.get("research_focus") or ""),
+        "required_content": str(lineage.get("required_content") or ""),
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "title": guide.get("title"),
         "source_guide_name": name,
@@ -1041,9 +1200,7 @@ def revise_guide(channel_input: str, name: str, instruction: str,
         "factcheck_used": bool(factcheck_meta and not factcheck_meta.get("skipped")),
         "factcheck_changed": bool(factcheck_meta and factcheck_meta.get("changed")),
         "quality_gate_used": True,
-        "quality_gate_passed": not bool(
-            quality_meta["story_flow"]["issues_after_final_pass"]
-        ),
+        "quality_gate_passed": bool(quality_meta.get("passed")),
     }
     write_json(out_dir / "request.json", request_meta)
     write_json(out_dir / "script.json", script)

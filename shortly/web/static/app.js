@@ -32,6 +32,18 @@ function mdToHtml(md) {
 // SSE 로 job 진행상황을 로그 요소에 스트리밍하고, 완료 시 콜백 호출
 function streamJob(jobId, logEl, onDone) {
   const es = new EventSource(`/api/jobs/${jobId}/stream`);
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    es.close();
+    getJSON(`/api/jobs/${jobId}`).then((job) => {
+      if (job.error_code === "commercial_ai_quota_exceeded") {
+        alert("상용 AI 토큰·크레딧 부족\n\n" + job.error);
+      }
+      onDone(job);
+    }).catch(() => {});
+  };
   es.onmessage = (e) => {
     let evt;
     try { evt = JSON.parse(e.data); } catch { return; }
@@ -39,11 +51,10 @@ function streamJob(jobId, logEl, onDone) {
       logEl.textContent += evt.message + "\n";
       logEl.scrollTop = logEl.scrollHeight;
     } else if (evt.type === "done" || evt.type === "error") {
-      es.close();
-      getJSON(`/api/jobs/${jobId}`).then((job) => onDone(job)).catch(() => {});
+      finish();
     }
   };
-  es.onerror = () => { es.close(); getJSON(`/api/jobs/${jobId}`).then(onDone).catch(() => {}); };
+  es.onerror = finish;
 }
 
 async function refreshStatus() {
@@ -486,7 +497,35 @@ function guideNameFromDir(dir) {
 function qualityNotice(quality) {
   const story = (quality && quality.story_flow) || {};
   const evidence = (quality && quality.research_evidence) || {};
+  const required = (quality && quality.required_content) || {};
+  const factcheck = (quality && quality.factcheck) || {};
   const issues = story.issues_after_final_pass || [];
+  if (factcheck.failed) {
+    return (
+      `<div class="quality-notice warn"><b>팩트체크를 완료하지 못했습니다</b>` +
+      `<span>자동 재시도에도 응답을 검증하지 못했습니다. 주요 주장과 수치를 확인한 뒤 다시 생성해 주세요.</span></div>`
+    );
+  }
+  if ((required.unsupported || []).length || (required.missing || []).length) {
+    const details = [];
+    if ((required.unsupported || []).length) {
+      details.push("근거 미확보: " + required.unsupported.join(" / "));
+    }
+    if ((required.missing || []).length) {
+      details.push("대본 누락: " + required.missing.join(" / "));
+    }
+    return (
+      `<div class="quality-notice warn"><b>필수 포함 내용 확인 필요</b>` +
+      `<span>${escapeHtml(details.join(" · "))}</span></div>`
+    );
+  }
+  if (story.rejected) {
+    return (
+      `<div class="quality-notice warn"><b>최종 흐름 보정 확인 필요</b>` +
+      `<span>사실·수치가 달라질 위험이 있어 자동 보정안을 적용하지 않았습니다. ` +
+      `표시된 대본을 확인한 뒤 다시 수정해 주세요.</span></div>`
+    );
+  }
   if (issues.length) {
     return (
       `<div class="quality-notice warn"><b>흐름 확인 필요</b>` +
@@ -500,11 +539,19 @@ function qualityNotice(quality) {
       `중요한 주장과 수치는 내보내기 전에 직접 확인해 주세요.</span></div>`
     );
   }
-  if (evidence.status === "strong") {
+  if (evidence.status === "strong" && quality.passed !== false) {
+    if (!quality.editorial_review || quality.editorial_review.passed !== true) {
+      return `<div class="quality-notice warn"><b>이야기 의미 검수 필요</b>` +
+        `<span>기존 규칙·출처 점검만으로는 제목 적합성이나 결말 완성도를 확인할 수 없습니다.</span></div>`;
+    }
     return (
       `<div class="quality-notice ok"><b>자동 품질 점검 통과</b>` +
-      `<span>이야기 흐름과 주요 출처 구성을 확인했습니다.</span></div>`
+      `<span>제목 적합성·전개·결말과 출처 구성을 점검했습니다. 조회수나 사실 정확성을 보장하지는 않습니다.</span></div>`
     );
+  }
+  if (quality && quality.editorial_review && quality.editorial_review.status !== "completed") {
+    return `<div class="quality-notice warn"><b>이야기 의미 검수를 완료하지 못했습니다</b>` +
+      `<span>대본은 보존했습니다. 제목·전개·결말을 직접 확인하거나 다시 수정해 주세요.</span></div>`;
   }
   return "";
 }
@@ -524,6 +571,11 @@ async function openSavedGuide(channel, name, li) {
       inputBlock =
         `<div class="g-input-orig"><div class="g-input-orig-label">${typeLabel}</div>` +
         `<div class="g-input-orig-text">${escapeHtml(g.request.input_text)}</div></div>`;
+      if (g.request.required_content) {
+        inputBlock +=
+          `<div class="g-input-orig"><div class="g-input-orig-label">대본 필수 포함 내용</div>` +
+          `<div class="g-input-orig-text">${escapeHtml(g.request.required_content)}</div></div>`;
+      }
     }
     $("saved-guide-result").innerHTML =
       inputBlock + qualityNotice(g.quality) + mdToHtml(g.guide_md || "(내용 없음)");
@@ -657,12 +709,32 @@ async function deleteSavedGuide(channel, name, title) {
 $("btn-refresh-guides").onclick = loadSavedGuides;
 $("channel-select").onchange = loadSavedGuides;
 
+function syncResearchFocusVisibility() {
+  const mode = document.querySelector('input[name="mode"]:checked')?.value;
+  const hidden = mode === "script";
+  const researchWrap = $("research-focus-wrap");
+  const requiredWrap = $("required-content-wrap");
+  if (researchWrap) researchWrap.hidden = hidden;
+  if (requiredWrap) requiredWrap.hidden = hidden;
+}
+
+document.querySelectorAll('input[name="mode"]').forEach((radio) => {
+  radio.addEventListener("change", syncResearchFocusVisibility);
+});
+syncResearchFocusVisibility();
+
 $("btn-guide").onclick = async () => {
   const channel = $("channel-select").value;
   const text = $("guide-text").value.trim();
   if (!channel) { alert("학습된 채널을 선택하세요"); return; }
   if (!text) { alert("주제 또는 대본을 입력하세요"); return; }
   const mode = document.querySelector('input[name="mode"]:checked').value;
+  const researchFocus = mode === "topic"
+    ? ($("research-focus")?.value || "").trim()
+    : "";
+  const requiredContent = mode === "topic"
+    ? ($("required-content")?.value || "").trim()
+    : "";
   const btn = $("btn-guide");
   btn.disabled = true;
   $("guide-log").textContent = "";
@@ -670,7 +742,8 @@ $("btn-guide").onclick = async () => {
   $("guide-downloads").innerHTML = "";
   try {
     const { job_id } = await postJSON("/api/guide", {
-      channel, text, is_script: mode === "script",
+      channel, text, is_script: mode === "script", research_focus: researchFocus,
+      required_content: requiredContent,
     });
     streamJob(job_id, $("guide-log"), (job) => {
       btn.disabled = false;

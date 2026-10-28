@@ -10,6 +10,11 @@
 # User data, downloaded media, generated outputs, and caches
 data/
 dist/
+/output/
+/backups/
+/tmp/
+/.codex-temp-archive/
+/generated-assets/
 *.log
 *.sqlite
 *.sqlite3

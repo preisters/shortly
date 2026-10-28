@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 import unittest
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from shortly.core.domain.assets import (
     AssetCandidate,
@@ -15,8 +17,8 @@ from shortly.core.use_cases.build_cut_manifest import (
     build_cut_manifest,
     classify_asset_type,
 )
-from shortly.generate.image_reco import recommend_cuts
-from shortly.llm.base import LLMClient
+from shortly.generate.image_reco import _profile_specific_terms, recommend_cuts
+from shortly.llm.base import LLMClient, LLMError
 from support import isolated_shortly_env
 
 try:
@@ -77,6 +79,14 @@ class _AssetDirectorLlm(LLMClient):
                         "실제 기록사진이 아닌 협상 상황 재현 장면",
                         "실제 포장 외형과 문구가 정확해야 함",
                     ],
+                    "visual_role_suggestions": [
+                        "갈등: 일본 바이어와의 협상",
+                        "쟁점: 실제 제품 포장 확인",
+                    ],
+                    "visible_text_suggestions": [
+                        "없음",
+                        "실제 제품 원본 문구 유지",
+                    ],
                     "stock_query_suggestions": ["", ""],
                     "person_depiction_suggestions": [
                         "fictional_person",
@@ -88,7 +98,277 @@ class _AssetDirectorLlm(LLMClient):
         }
 
 
+class _FailingAssetDirectorLlm(LLMClient):
+    available = True
+    text_model = "fixture-failing-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete_json(self, *args, **kwargs):
+        self.calls += 1
+        raise LLMError("fixture parse failure")
+
+
+class _RetryingAssetDirectorLlm(_AssetDirectorLlm):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete_json(self, *args, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise LLMError("first response was truncated")
+        return super().complete_json(*args, **kwargs)
+
+
+class _RepairingStockQueryLlm(_AssetDirectorLlm):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete_json(self, *args, **kwargs):
+        self.calls += 1
+        payload = super().complete_json(*args, **kwargs)
+        segment = payload["segments"][0]
+        segment["asset_type_suggestions"][0] = "stock_image"
+        segment["image_suggestions"][0] = "베트남 도심의 무더운 거리"
+        segment["stock_query_suggestions"][0] = (
+            "베트남 무더운 거리"
+            if self.calls == 1
+            else "Vietnam tropical city street"
+        )
+        segment["person_depiction_suggestions"][0] = "none"
+        segment["ai_disclosure_suggestions"][0] = False
+        return payload
+
+
+class _BatchAssetDirectorLlm(LLMClient):
+    available = True
+    text_model = "fixture-batch-model"
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    def complete_json(self, system, user, **kwargs):
+        requested = [
+            (int(index), int(cuts))
+            for index, cuts in re.findall(r"- index (\d+): 컷 (\d+)개", user)
+        ]
+        self.calls.append(requested)
+        items = []
+        for index, cuts in requested:
+            items.append(
+                {
+                    "index": index,
+                    "image_suggestions": [f"현재 주제 장면 {index}-{cut}" for cut in range(cuts)],
+                    "media_suggestions": ["사진"] * cuts,
+                    "effect_suggestions": ["없음"] * cuts,
+                    "asset_type_suggestions": ["generated_image"] * cuts,
+                    "fact_sensitive_suggestions": [False] * cuts,
+                    "asset_reason_suggestions": ["현재 대본 재연"] * cuts,
+                    "visual_role_suggestions": ["현재 이야기 전개"] * cuts,
+                    "visible_text_suggestions": ["없음"] * cuts,
+                    "stock_query_suggestions": [""] * cuts,
+                    "person_depiction_suggestions": ["none"] * cuts,
+                    "ai_disclosure_suggestions": [False] * cuts,
+                }
+            )
+        return {"segments": items}
+
+
 class CutManifestTests(unittest.TestCase):
+    def test_asset_director_receives_story_context_and_visual_coverage_rules(
+        self,
+    ) -> None:
+        class CapturingLlm(_AssetDirectorLlm):
+            def complete_json(self, system, user, **kwargs):
+                self.system = system
+                self.user = user
+                return super().complete_json(system, user, **kwargs)
+
+        llm = CapturingLlm()
+        guide = {
+            "title": "독도 때문에 일본시장 포기한 회사",
+            "hook": "일본 수출보다 독도 표기를 택했다",
+            "segments": [
+                {
+                    "index": 0,
+                    "duration_sec": 4,
+                    "intent": "결과 반전",
+                    "caption": "독도 표기를 지켰다",
+                    "narration": (
+                        "일본이 큰 수출 시장이지만 독도 표기를 지우느니 "
+                        "일본 수출을 포기했다"
+                    ),
+                    "cuts_suggested": 2,
+                }
+            ],
+        }
+
+        classified = recommend_cuts(
+            llm,
+            {"image_style": {}, "editing_style": {}},
+            guide,
+        )
+
+        self.assertIn("독도 때문에 일본시장 포기한 회사", llm.user)
+        self.assertIn("일본 수출보다 독도 표기를 택했다", llm.user)
+        self.assertIn("무음 테스트", llm.user)
+        self.assertIn("범용 B-roll은 세그먼트당 최대 한 컷", llm.user)
+        self.assertIn("visual_role_suggestions", llm.user)
+        self.assertIn("visible_text_suggestions", llm.user)
+        self.assertIn("화면 글자 지시:", llm.user)
+        self.assertIn("모든 포장의 색, 도형, 라벨 위치, 철자와 서체", llm.user)
+        self.assertIn("대표 행동 하나만", llm.user)
+        self.assertIn("음식의 김·수증기는 기본 연출에서 제외", llm.user)
+        self.assertIn("전자레인지로 데운 김밥", llm.user)
+        self.assertIn("음식 종류나 '데웠다'는 언급만으로 예외", llm.user)
+        self.assertIn("약하고 자연스러운 김을 허용", llm.user)
+        self.assertIn("주요 인물 한 명, 주요 소품 한 종류", llm.user)
+        self.assertIn("손·입·소품이 연속으로 바뀌는 다단계", llm.user)
+        self.assertIn("다른 물체로 변하거나 합쳐지거나 사라지는 장면", llm.user)
+        self.assertEqual(
+            classified["segments"][0]["visual_role_suggestions"],
+            ["갈등: 일본 바이어와의 협상", "쟁점: 실제 제품 포장 확인"],
+        )
+        self.assertIn(
+            "화면 글자 지시: 읽을 수 있는 글자 없음",
+            classified["segments"][0]["image_suggestions"][0],
+        )
+
+    def test_asset_director_retries_a_failed_batch_once(self) -> None:
+        llm = _RetryingAssetDirectorLlm()
+        guide = {
+            "title": "현재 주제",
+            "segments": [
+                {
+                    "index": 0,
+                    "duration_sec": 4,
+                    "narration": "현재 사건을 설명한다",
+                    "cuts_suggested": 2,
+                }
+            ],
+        }
+
+        classified = recommend_cuts(
+            llm,
+            {"image_style": {}, "editing_style": {}},
+            guide,
+        )
+
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(classified["visual_recommendation"]["status"], "complete")
+        self.assertEqual(classified["visual_recommendation"]["retry_count"], 1)
+        self.assertEqual(
+            classified["segments"][0]["asset_classification_source"],
+            "generation_llm",
+        )
+
+    def test_stock_cut_requires_compact_english_search_query(self) -> None:
+        llm = _RepairingStockQueryLlm()
+        guide = {
+            "title": "베트남 거리",
+            "segments": [
+                {
+                    "index": 0,
+                    "duration_sec": 4,
+                    "narration": "한낮의 베트남 도심을 보여준다",
+                    "cuts_suggested": 2,
+                }
+            ],
+        }
+
+        classified = recommend_cuts(
+            llm,
+            {"image_style": {}, "editing_style": {}},
+            guide,
+        )
+        manifest = build_cut_manifest(classified)
+
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(
+            classified["segments"][0]["stock_query_suggestions"][0],
+            "Vietnam tropical city street",
+        )
+        self.assertEqual(
+            manifest.cuts[0].stock_query,
+            "Vietnam tropical city street",
+        )
+        errors = classified["visual_recommendation"]["errors"]
+        self.assertTrue(any("한글이 포함됨" in item["message"] for item in errors))
+
+    def test_asset_director_splits_large_storyboard_into_small_batches(self) -> None:
+        llm = _BatchAssetDirectorLlm()
+        guide = {
+            "title": "현재 주제",
+            "segments": [
+                {
+                    "index": index,
+                    "duration_sec": 4,
+                    "narration": f"현재 주제의 {index}번째 장면",
+                    "cuts_suggested": 2,
+                }
+                for index in range(5)
+            ],
+        }
+
+        classified = recommend_cuts(
+            llm,
+            {"image_style": {}, "editing_style": {}},
+            guide,
+        )
+
+        self.assertEqual(len(llm.calls), 2)
+        self.assertTrue(all(sum(cuts for _, cuts in call) <= 8 for call in llm.calls))
+        self.assertEqual(classified["visual_recommendation"]["status"], "complete")
+        self.assertEqual(classified["visual_recommendation"]["batch_count"], 2)
+
+    def test_failed_asset_director_never_reuses_learned_video_subjects(self) -> None:
+        llm = _FailingAssetDirectorLlm()
+        guide = {
+            "title": "특수분유 이야기",
+            "hook": "만들수록 손해인 분유",
+            "segments": [
+                {
+                    "index": 0,
+                    "duration_sec": 4,
+                    "narration": "매일유업이 희귀질환 아이들을 위한 특수분유를 만든다",
+                    "cuts_suggested": 2,
+                }
+            ],
+        }
+        profile = {
+            "image_style": {
+                "subjects": [
+                    "명랑핫도그 치즈가 늘어나는 사진",
+                    "명랑핫도그 제품을 보여주는 사진",
+                ]
+            },
+            "editing_style": {},
+        }
+
+        classified = recommend_cuts(llm, profile, guide)
+        segment = classified["segments"][0]
+
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(classified["visual_recommendation"]["status"], "fallback")
+        self.assertEqual(segment["asset_classification_source"], "heuristic_fallback")
+        self.assertIn("매일유업", segment["image_suggestions"][0])
+        self.assertNotIn("명랑핫도그", " ".join(segment["image_suggestions"]))
+        self.assertIn("visual_recommendation_warning", segment)
+
+    def test_generic_person_and_split_words_are_not_profile_leaks(self) -> None:
+        terms = _profile_specific_terms(
+            {
+                "subjects": [
+                    "여성이 음식을 반으로 자르는 사진",
+                    "여성이 제품을 반으로 자르는 장면",
+                ]
+            }
+        )
+
+        self.assertNotIn("여성이", terms)
+        self.assertNotIn("반으로", terms)
+
     def test_personal_asset_console_exposes_safe_batch_generation(self) -> None:
         page = (
             Path(__file__).resolve().parents[1]
@@ -117,21 +397,43 @@ class CutManifestTests(unittest.TestCase):
         )
         self.assertNotIn("setInterval(refreshJobStatuses,2000)", page)
         self.assertIn('setCutState(cut.id,"running")', page)
+        self.assertIn('return cut.selected_candidate_id?"재생성":"비용 확인·생성"', page)
+        self.assertIn('const action=cut.selected_candidate_id?"재생성":"생성"', page)
+        self.assertIn('실제 유료 ${action}을 승인할까요?', page)
         self.assertIn('data-stock-search="', page)
         self.assertIn("/stock-search?", page)
         self.assertIn("/stock-select", page)
-        self.assertIn("cut.stock_query||cut.prompt", page)
+        self.assertIn('value=cut.stock_query||""', page)
+        self.assertNotIn("cut.stock_query||cut.prompt", page)
+        self.assertIn("추천 검색어가 없습니다", page)
         self.assertIn("가상 인물 고지", page)
         self.assertIn("CC BY 결과도 포함", page)
         self.assertIn("현재 선택은 해제됩니다", page)
         self.assertIn("el.value=cut.asset_type", page)
-        self.assertIn("스톡 이미지가 선택되지 않은 컷이 있습니다", page)
+        self.assertIn("스톡 이미지를 선택하지 않은 컷이 있습니다", page)
+        self.assertIn("이미지가 자동 삽입되지 않습니다", page)
+        self.assertIn("선택하지 않은 상태로 내보내기를 계속", page)
         self.assertIn("<th>미리보기</th>", page)
         self.assertIn("/preview?v=", page)
         self.assertIn("AI 이미지", page)
         self.assertNotIn("AI 이미지 생성 · 권장", page)
         self.assertIn(
             'replace(/^생성 모델 판단\\s*[:：]\\s*/,"")',
+            page,
+        )
+        self.assertIn("failure.reason", page)
+        self.assertIn("failure.recommendation", page)
+        self.assertIn("failure.technical_detail", page)
+        self.assertIn("재시도 권장", page)
+        self.assertIn("수동 처리 검토", page)
+        self.assertIn("job.result?.failure", page)
+        self.assertIn("function legacyFailure(job)", page)
+        self.assertIn("function actionMarkup(cut)", page)
+        self.assertIn("data-restore-kind", page)
+        self.assertIn("AI 영상 다시 시도", page)
+        self.assertIn("이전 생성 실패로 수동 처리 유형이 된 컷입니다", page)
+        self.assertIn(
+            'asset_type:restoreKind==="video"?"generated_video":"generated_image"',
             page,
         )
 
@@ -150,6 +452,18 @@ class CutManifestTests(unittest.TestCase):
             CutManifest.from_dict(manifest.to_dict()).to_dict(),
             manifest.to_dict(),
         )
+
+    def test_manifest_uses_semantic_cut_change_ratios(self) -> None:
+        guide = _guide()
+        guide["segments"][0]["sentence_count"] = 1
+        guide["segments"][0]["cut_change_ratios"] = [0.25]
+
+        manifest = build_cut_manifest(guide)
+
+        self.assertEqual(manifest.cuts[0].start_sec, 0.0)
+        self.assertEqual(manifest.cuts[0].duration_sec, 1.0)
+        self.assertEqual(manifest.cuts[1].start_sec, 1.0)
+        self.assertEqual(manifest.cuts[1].duration_sec, 3.0)
 
     def test_fact_sensitive_rule_blocks_generation(self) -> None:
         asset_type, media, fact_sensitive, notes = classify_asset_type(
@@ -428,6 +742,39 @@ class CutManifestTests(unittest.TestCase):
         self.assertTrue(cut.fact_sensitive)
         self.assertTrue(any("안전 규칙" in note for note in cut.notes))
 
+    def test_blank_product_video_requires_reference_guided_manual_generation(
+        self,
+    ) -> None:
+        guide = {
+            "title": "fixture",
+            "total_duration_sec": 3,
+            "segments": [
+                {
+                    "index": 0,
+                    "start_sec": 0,
+                    "duration_sec": 3,
+                    "narration": "도시락 컵라면이 러시아 열차에서 인기를 얻었다",
+                    "caption": "도시락의 인기",
+                    "cuts_suggested": 1,
+                    "image_suggestions": [
+                        "열차 테이블 위 무지 흰색 사각 컵라면, 로고 없음"
+                    ],
+                    "media_suggestions": ["영상/움짤"],
+                    "asset_type_suggestions": ["generated_video"],
+                    "fact_sensitive_suggestions": [False],
+                    "asset_reason_suggestions": [
+                        "실제 브랜드 외형은 쓰지 않음"
+                    ],
+                }
+            ],
+        }
+        cut = build_cut_manifest(guide).cuts[0]
+
+        self.assertEqual(cut.asset_type, AssetType.MANUAL_REQUIRED)
+        self.assertEqual(cut.media_kind, MediaKind.VIDEO)
+        self.assertTrue(cut.fact_sensitive)
+        self.assertTrue(any("무브랜드" in note for note in cut.notes))
+
     def test_explicit_override_is_recorded(self) -> None:
         manifest = build_cut_manifest(
             _guide(), overrides={"s000-c01": AssetType.MEME.value}
@@ -509,7 +856,13 @@ class CutManifestTests(unittest.TestCase):
                 SHORTLY_ARTIFACT_DIR=str(Path(temporary) / "artifacts"),
             ):
                 app = create_personal_app(service_api=_SavedGuideService())
-                with TestClient(
+                with patch(
+                    "shortly.apps.personal.automation.api.prepare_guide_tts_timing",
+                    side_effect=lambda guide, *_args: (
+                        guide,
+                        {"status": "disabled"},
+                    ),
+                ), TestClient(
                     app, client=("127.0.0.1", 50000)
                 ) as client:
                     first = client.post(

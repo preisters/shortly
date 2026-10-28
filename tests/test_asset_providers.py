@@ -58,12 +58,22 @@ class AssetProviderTests(unittest.TestCase):
     def test_google_adapter_uses_vertical_video_response(self) -> None:
         client = _GoogleClient()
         provider = GoogleVideoProvider("", client=client)
-        submission = provider.submit(VideoGenerationRequest(prompt="fixture"))
+        submission = provider.submit(
+            VideoGenerationRequest(prompt="fixture", duration_seconds=10)
+        )
         self.assertTrue(submission.completed)
         self.assertEqual(submission.asset.data, b"video")
         self.assertEqual(
             client.interactions.kwargs["response_format"]["aspect_ratio"],
             "9:16",
+        )
+        self.assertEqual(
+            client.interactions.kwargs["response_format"]["duration"],
+            "4s",
+        )
+        self.assertEqual(
+            submission.asset.metadata["output_duration_sec"],
+            4,
         )
 
     def test_google_adapter_reports_sdk_without_interactions(self) -> None:

@@ -15,12 +15,17 @@ import json
 import os
 import re
 import shutil
+import struct
+import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from ..utils import log, write_json
+from ..core.domain.framing import contain_layout
+from ..tts.pronunciation import korean_speech_text
 
 _US = 1_000_000  # CapCut 은 마이크로초 단위 사용
 
@@ -45,7 +50,9 @@ def export_capcut_draft(guide: Dict, out_path: Path) -> Dict:
         text_materials.append({
             "id": tmat_id,
             "type": "text",
-            "content": _caption_safe_korean(s.get("caption", "")),
+            "content": _caption_display_lines([
+                _caption_safe_korean(s.get("caption", ""))
+            ])[0],
             "font_size": 12,
             "text_color": "#FFFFFF",
         })
@@ -162,6 +169,7 @@ _RECO_Y_GAP = 0.06         # 컷 카드 아래로 띄우는 간격(transform y)
 _BG_COLOR = (30, 32, 41)   # 기본 프레임 배경색(어두운 슬레이트)
 _CARD_FILL = (240, 240, 240)   # 컷 이미지 카드 배경
 _CARD_BORDER = (120, 120, 130)  # 컷 이미지 카드 테두리
+_GENERATED_IMAGE_SAFE_TOP_FRACTION = 0.25
 
 # 챙맛 채널에서 사람이 직접 조정한 프로젝트. 이 프로젝트들의 콘텐츠 이미지
 # 세그먼트를 소재 템플릿으로만 사용하고, 원본 프로젝트 자체는 수정하지 않는다.
@@ -343,20 +351,34 @@ def _reference_asset_layout(
     height: int,
     media_kind: str = "image",
 ) -> Tuple[float, float]:
-    """수동 레퍼런스 108개 클립의 종횡비별 중앙값에 가까운 배치를 반환한다."""
+    """이미지와 영상 모두 원본 전체를 동일한 본문 영역 안에 배치한다."""
+    return contain_layout(width, height)
 
-    ratio = width / height if width > 0 and height > 0 else 2 / 3
-    if media_kind == "video" and ratio < 0.8:
-        return 0.74, -0.1
-    if ratio < 0.8:
-        return 0.64, -0.21
-    if ratio <= 1.2:
-        return 0.72, -0.12
-    return 0.8, -0.1
+
+def _video_duration_us(path: Path) -> Optional[int]:
+    """Local, bounded metadata probe; unknown duration is never invented."""
+    executable = shutil.which("ffprobe")
+    if not executable:
+        return None
+    try:
+        result = subprocess.run(
+            [executable, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=10, check=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        duration = int(float(result.stdout.strip()) * _US)
+        return duration if duration > 0 else None
+    except (OSError, ValueError, OverflowError, subprocess.SubprocessError):
+        return None
 
 
 def _asset_dimensions(path: Path, media_kind: str) -> Tuple[int, int]:
-    if media_kind != "video":
+    if media_kind == "video":
+        dimensions = _mp4_dimensions(path)
+        if dimensions is not None:
+            return dimensions
+    else:
         try:
             from PIL import Image
 
@@ -367,6 +389,74 @@ def _asset_dimensions(path: Path, media_kind: str) -> Tuple[int, int]:
         except (ImportError, OSError, ValueError):
             pass
     return _CANVAS_W, _CANVAS_H
+
+
+def _mp4_dimensions(path: Path) -> Optional[Tuple[int, int]]:
+    """Read track dimensions from an MP4 tkhd box without optional codecs."""
+
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    marker = b"tkhd"
+    offset = 0
+    candidates: List[Tuple[int, int]] = []
+    while True:
+        marker_at = data.find(marker, offset)
+        if marker_at < 4:
+            break
+        box_start = marker_at - 4
+        box_size = struct.unpack(">I", data[box_start:marker_at])[0]
+        header_size = 8
+        if box_size == 1 and box_start + 16 <= len(data):
+            box_size = struct.unpack(
+                ">Q",
+                data[box_start + 8:box_start + 16],
+            )[0]
+            header_size = 16
+        box_end = box_start + box_size
+        if (
+            box_size >= header_size + 8
+            and box_end <= len(data)
+        ):
+            width_fixed, height_fixed = struct.unpack(
+                ">II",
+                data[box_end - 8:box_end],
+            )
+            width = int(round(width_fixed / 65536))
+            height = int(round(height_fixed / 65536))
+            if 0 < width <= 16384 and 0 < height <= 16384:
+                candidates.append((width, height))
+        offset = marker_at + len(marker)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0] * item[1])
+
+
+def _center_crop_for_vertical(width: int, height: int) -> Dict[str, float]:
+    """Return a centered crop quad no wider than the 9:16 Shorts canvas."""
+
+    if width <= 0 or height <= 0:
+        left, right = 0.0, 1.0
+    else:
+        source_ratio = width / height
+        target_ratio = _CANVAS_W / _CANVAS_H
+        if source_ratio <= target_ratio:
+            left, right = 0.0, 1.0
+        else:
+            visible_width = target_ratio / source_ratio
+            left = (1.0 - visible_width) / 2.0
+            right = 1.0 - left
+    return {
+        "upper_left_x": left,
+        "upper_left_y": 0.0,
+        "upper_right_x": right,
+        "upper_right_y": 0.0,
+        "lower_left_x": left,
+        "lower_left_y": 1.0,
+        "lower_right_x": right,
+        "lower_right_y": 1.0,
+    }
 
 
 def _clone_seg(seg: Dict, src_mats: Dict):
@@ -411,6 +501,61 @@ def _merge_materials(dst: Dict, cloned: Dict) -> None:
         dst[arr_name].extend(items)
 
 
+def _pick_generated_video_mask_template(
+    root: Path,
+    max_projects: int = 80,
+) -> Optional[Dict]:
+    """최근 수동 편집 컷에 연결된 실제 CapCut 마스크 소재를 찾는다."""
+
+    try:
+        projects = [
+            project
+            for project in root.iterdir()
+            if project.is_dir() and (project / "draft_content.json").is_file()
+        ]
+    except OSError:
+        return None
+    projects.sort(key=lambda project: project.stat().st_mtime, reverse=True)
+    for project in projects[:max_projects]:
+        try:
+            document = _read_json(project / "draft_content.json")
+        except (OSError, ValueError, TypeError):
+            continue
+        materials = document.get("materials") or {}
+        index = _index_materials(materials)
+        for track in document.get("tracks") or []:
+            for segment in track.get("segments") or []:
+                info = index.get(segment.get("material_id"))
+                if not info:
+                    continue
+                main = info[1]
+                filename = Path(str(main.get("path") or "")).name.lower()
+                if not filename.startswith("cut_") or not filename.endswith(".mp4"):
+                    continue
+                for ref in segment.get("extra_material_refs") or []:
+                    mask_info = index.get(ref)
+                    if mask_info and mask_info[0] == "common_mask":
+                        return copy.deepcopy(mask_info[1])
+    return None
+
+
+def _attach_common_mask(
+    segment: Dict,
+    cloned_materials: Dict,
+    mask_template: Optional[Dict],
+) -> bool:
+    """영상 세그먼트에 실제 common_mask 소재를 연결한다."""
+
+    if not isinstance(mask_template, dict):
+        return False
+    mask = copy.deepcopy(mask_template)
+    mask["id"] = _new_id()
+    cloned_materials.setdefault("common_mask", []).append(mask)
+    segment.setdefault("extra_material_refs", []).append(mask["id"])
+    segment["enable_video_mask"] = True
+    return True
+
+
 def _wrap_korean(text: str, max_chars: int = _MAX_LINE_CHARS) -> str:
     """긴 문장을 줄바꿈해 가로 넘침을 방지(수동 개행 삽입)."""
     text = re.sub(r"\s+", " ", (text or "").strip())
@@ -435,6 +580,16 @@ def _wrap_korean(text: str, max_chars: int = _MAX_LINE_CHARS) -> str:
     if cur:
         lines.append(cur)
     return "\n".join(lines)
+
+
+def _single_line_title(text: str) -> str:
+    """프로젝트 구분용 공백·개행을 정리해 본문 제목을 한 줄로 만든다."""
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def _single_line_title_size(text: str, base_size: float) -> float:
+    """본문 제목 크기는 유지한다. 긴 문구는 텍스트 박스에서 자동 개행한다."""
+    return float(base_size)
 
 
 def _split_two_lines(text: str) -> Tuple[str, str]:
@@ -492,7 +647,11 @@ def _split_display_units(text: str, unit_len: int = _CAPTION_UNIT_LEN) -> List[s
             cur = cur[cut:].strip()
     if cur:
         units.append(cur)
-    return [u for u in units if u]
+    return [
+        _caption_display_lines([unit])[0]
+        for unit in units
+        if unit
+    ]
 
 
 def _generate_frame_bg(path: Path, img_scale: float = _IMG_SCALE,
@@ -521,6 +680,55 @@ def _generate_frame_bg(path: Path, img_scale: float = _IMG_SCALE,
         return True
     except OSError:
         return False
+
+
+def _crop_generated_image_safe_top(
+    path: Path,
+    fraction: float = _GENERATED_IMAGE_SAFE_TOP_FRACTION,
+) -> bool:
+    """생성 시 확보한 상단 자막 여백을 잘라 실제 콘텐츠 영역만 남긴다."""
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return False
+    try:
+        with Image.open(path) as source:
+            image = ImageOps.exif_transpose(source)
+            width, height = image.size
+            crop_top = max(1, min(height - 1, int(round(height * fraction))))
+            cropped = image.crop((0, crop_top, width, height))
+            output_format = "PNG" if path.suffix.lower() == ".png" else "JPEG"
+            if output_format == "JPEG":
+                cropped = cropped.convert("RGB")
+            temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+            cropped.save(
+                temporary,
+                format=output_format,
+                **(
+                    {"quality": 94, "optimize": True}
+                    if output_format == "JPEG"
+                    else {}
+                ),
+            )
+            os.replace(temporary, path)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _is_generated_image_asset(selected: Dict, source: Path) -> bool:
+    """신규 명세와 기존 prepared-export 모두에서 생성 이미지를 판별한다."""
+    if str(selected.get("media_kind") or "") != "image":
+        return False
+    if str(selected.get("asset_type") or "") == "generated_image":
+        return True
+    parts = {part.lower() for part in source.parts}
+    return (
+        not selected.get("asset_type")
+        and "generated-assets" in parts
+        and "stock" not in parts
+        and source.name.lower().startswith("image-original")
+    )
 
 
 def _load_kr_font(size: int):
@@ -630,13 +838,26 @@ def _build_photo_segment(image_tpl: Dict, img_path: Path, start_us: int,
                          render_index: int, media_kind: str = "image"):
     """컷/배경 이미지용 photo 세그먼트 1개를 생성(세그먼트, 복제소재)."""
     seg, cloned, main = _clone_seg(image_tpl["seg"], image_tpl["materials"])
+    # A photo template may carry a user's mask/effect. Never transfer it to
+    # unrelated selected assets; intentional effects may be attached later.
+    seg["extra_material_refs"] = []
+    seg["enable_video_mask"] = False
+    if main is not None:
+        cloned = {"videos": [main]}
     if main is not None:
         source_width, source_height = _asset_dimensions(img_path, media_kind)
         main["type"] = "video" if media_kind == "video" else "photo"
         main["path"] = str(img_path).replace("\\", "/")
         main["width"] = source_width
         main["height"] = source_height
-        main["duration"] = dur_us if media_kind == "video" else _PHOTO_DURATION
+        actual_duration = _video_duration_us(img_path) if media_kind == "video" else None
+        if actual_duration is not None and dur_us > actual_duration + 50_000:
+            raise ValueError(
+                f"{img_path.name}: 영상은 {actual_duration / _US:.2f}초인데 "
+                f"컷에는 {dur_us / _US:.2f}초가 필요합니다. 컷 길이를 줄이거나 "
+                "더 긴 영상을 선택하세요. 자동 반복은 하지 않습니다."
+            )
+        main["duration"] = (actual_duration or dur_us) if media_kind == "video" else _PHOTO_DURATION
         main["has_audio"] = False
         main["material_name"] = img_path.name
         for pk in ("media_path", "reverse_path", "intensifies_path",
@@ -647,16 +868,20 @@ def _build_photo_segment(image_tpl: Dict, img_path: Path, start_us: int,
         if isinstance(main.get("matting"), dict):
             main["matting"]["path"] = ""
         main["crop"] = {
-            "upper_left_x": 0.0, "upper_left_y": 0.0,
-            "upper_right_x": 1.0, "upper_right_y": 0.0,
-            "lower_left_x": 0.0, "lower_left_y": 1.0,
-            "lower_right_x": 1.0, "lower_right_y": 1.0,
-        }
+                "upper_left_x": 0.0, "upper_left_y": 0.0,
+                "upper_right_x": 1.0, "upper_right_y": 0.0,
+                "lower_left_x": 0.0, "lower_left_y": 1.0,
+                "lower_right_x": 1.0, "lower_right_y": 1.0,
+            }
         main["crop_ratio"] = "free"
         main["crop_scale"] = 1.0
     seg["target_timerange"] = {"start": start_us, "duration": dur_us}
     seg["source_timerange"] = {"start": 0, "duration": dur_us}
     seg["clip"] = _clip(scale, y)
+    if media_kind == "video":
+        seg["volume"] = 0.0
+        if "last_nonzero_volume" in seg:
+            seg["last_nonzero_volume"] = 0.0
     seg["render_index"] = render_index
     return seg, cloned
 
@@ -672,6 +897,34 @@ def _pick(items: Optional[List], c: int) -> str:
     if not items:
         return ""
     return str(items[c] if c < len(items) else items[-1]).strip()
+
+
+def _guide_cut_count(segment: Dict) -> int:
+    """가이드의 문장당 최대 3컷 계약을 내보내기에서도 보존한다."""
+    sentence_count = max(1, int(segment.get("sentence_count") or 1))
+    sentence_cap = min(sentence_count * 3, 18)
+    return max(1, min(int(segment.get("cuts_suggested") or 1), sentence_cap))
+
+
+def _cut_ratio_edges(segment: Dict, cut_count: int) -> List[float]:
+    """의미 경계 비율을 컷 시작·종료점으로 바꾸고 구형 가이드는 균등 분할한다."""
+    raw = segment.get("cut_change_ratios")
+    if isinstance(raw, list) and len(raw) == cut_count - 1:
+        try:
+            changes = [float(value) for value in raw]
+        except (TypeError, ValueError):
+            changes = []
+        if (
+            len(changes) == cut_count - 1
+            and all(0.0 < value < 1.0 for value in changes)
+            and changes == sorted(changes)
+            and all(
+                right - left >= 0.02
+                for left, right in zip([0.0, *changes], [*changes, 1.0])
+            )
+        ):
+            return [0.0, *changes, 1.0]
+    return [index / cut_count for index in range(cut_count + 1)]
 
 
 def _collect_anim_catalog(root: Path, max_projects: int = 40) -> List[Dict]:
@@ -824,11 +1077,17 @@ def export_to_capcut_project(guide: Dict,
         bg_segs.append(bseg)
 
     # (2) 상단 고정 제목 — 영상 전체 지속(소스처럼 제목을 항상 노출)
-    title_text = (guide.get("hook") or guide.get("title") or "").strip()
+    title_text = _single_line_title(
+        guide.get("hook") or guide.get("title") or ""
+    )
     if title_text:
+        title_size = _single_line_title_size(title_text, _TITLE_FONT_SIZE)
         tiseg, cloned_ti = _build_text_segment(
             text_tpl, title_text, 0, total_us, lp["title_y"],
-            _TITLE_FONT_SIZE, _TITLE_MAX_CHARS, render_index=16000)
+            title_size, max(_TITLE_MAX_CHARS, len(title_text)),
+            render_index=16000)
+        for material in cloned_ti.get("texts", []):
+            _set_single_line_title_keep_style(material, title_text)
         _merge_materials(mats, cloned_ti)
         title_segs.append(tiseg)
 
@@ -858,14 +1117,15 @@ def export_to_capcut_project(guide: Dict,
 
         # 컷 이미지: cuts_suggested 만큼 균등 분할, 프레임 안쪽에 축소 배치
         if image_tpl is not None:
-            n_cuts = max(1, min(int(s.get("cuts_suggested") or 1), 6))
+            n_cuts = _guide_cut_count(s)
+            cut_edges = _cut_ratio_edges(s, n_cuts)
             img_recos = s.get("image_suggestions") or []
             media_recos = s.get("media_suggestions") or []
             effect_recos = s.get("effect_suggestions") or []
             for c in range(n_cuts):
                 cut_no += 1
-                c_start = seg_start + int(round(c * seg_dur / n_cuts))
-                c_end = seg_start + int(round((c + 1) * seg_dur / n_cuts))
+                c_start = seg_start + int(round(cut_edges[c] * seg_dur))
+                c_end = seg_start + int(round(cut_edges[c + 1] * seg_dur))
                 c_dur = max(200_000, c_end - c_start)
                 cut_id = f"s{int(s.get('index', i)):03d}-c{c:02d}"
                 selected = cut_assets.get(cut_id) or {}
@@ -883,9 +1143,13 @@ def export_to_capcut_project(guide: Dict,
                     media_kind = "image"
                     if _generate_cut_image(img_path, cut_no):
                         images_ok += 1
+                asset_scale, asset_y = _reference_asset_layout(
+                    *_asset_dimensions(img_path, media_kind), media_kind)
+                if isinstance(layout, dict) and isinstance(layout.get("image"), dict):
+                    asset_scale, asset_y = lp["img_scale"], lp["img_y"]
                 vseg, cloned_v = _build_photo_segment(
-                    image_tpl, img_path, c_start, c_dur, lp["img_scale"],
-                    lp["img_y"], render_index=100 + cut_no,
+                    image_tpl, img_path, c_start, c_dur, asset_scale,
+                    asset_y, render_index=100 + cut_no,
                     media_kind=media_kind)
                 # 추천 효과를 실제 캡컷 애니메이션으로 부착(가능 시)
                 effect = _pick(effect_recos, c)
@@ -1045,12 +1309,16 @@ def _register_in_root(root: Path, meta: Dict, draft_id: str, fold_path: str,
 # =====================================================================
 
 _TTS_GAP_US = 90_000        # 자막(TTS) 사이 간격
+_CAPTION_LINE_SPACING = 0.12  # CapCut UI 줄 간격 2
 _CAP_UNDER_TITLE = 0.14     # 제목 대비 자막을 아래로 내리는 정도(transform y)
 _TITLE_PLACEHOLDERS = ("제목이 들어갑니다", "제목을 입력하세요", "제목 입력")
 # 사용자가 템플릿에 넣어둔 '자막 예시' 세그먼트를 식별하는 표식(위치/크기 복제용)
 _CAPTION_SAMPLE_MARKERS = ("자막", "대사", "caption", "subtitle")
 _INTRO_DEFAULT_US = 1_000_000  # blank_10 인트로를 못 찾을 때 기본 인트로 길이
-_INTRO_CLICK_LEAD_US = 133_333  # 수동 레퍼런스 3개의 컷 전환 클릭음 중앙값
+# '제사상까지 올라간 초코파이' 수동 보정값. 클릭은 제목 TTS 끝과
+# 0.1초만 겹치고, 본문 TTS는 클릭이 완전히 끝난 뒤 시작한다.
+_INTRO_CLICK_LEAD_US = 100_000
+_INTRO_CLICK_BODY_GAP_US = 300_000  # 클릭 종료 후 본문 음성 전 숨 고르기
 _START_SFX_MARKERS = ("띠링", "시작")
 _CLICK_SFX_MARKERS = ("클릭음",)
 _AI_DISCLOSURE_MARKERS = ("AI 생성", "실존 인물이 아닙니다")
@@ -1072,6 +1340,80 @@ def _title_for_tts(text: str) -> str:
     """제목 TTS 문구: 끝의 공백/문장부호를 없애고 '?'를 붙여 끝음을 올린다."""
     t = re.sub(r"[\s?!.…·,]+$", "", (text or "").strip())
     return (t + "?") if t else ""
+
+
+_TTS_DIGIT_WORDS = ("영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구")
+_TTS_LARGE_NUMBER_UNITS = ("", "만", "억", "조", "경")
+
+
+def _tts_four_digit_number(value: int) -> str:
+    """0~9999 정수를 TTS용 한자어 수사로 바꾼다."""
+
+    parts: List[str] = []
+    for divisor, unit in ((1000, "천"), (100, "백"), (10, "십"), (1, "")):
+        digit = value // divisor
+        value %= divisor
+        if not digit:
+            continue
+        if digit != 1 or not unit:
+            parts.append(_TTS_DIGIT_WORDS[digit])
+        parts.append(unit)
+    return "".join(parts)
+
+
+def _tts_integer_number(digits: str) -> str:
+    """쉼표가 포함될 수 있는 양의 정수 문자열을 한자어 수사로 바꾼다."""
+
+    normalized = (digits or "0").replace(",", "").lstrip("0") or "0"
+    if normalized == "0":
+        return _TTS_DIGIT_WORDS[0]
+
+    groups: List[int] = []
+    while normalized:
+        groups.append(int(normalized[-4:]))
+        normalized = normalized[:-4]
+    if len(groups) > len(_TTS_LARGE_NUMBER_UNITS):
+        # 현실적인 대본 범위를 벗어난 큰 수는 숫자를 한 자리씩 읽는 편이 안전하다.
+        return "".join(_TTS_DIGIT_WORDS[int(char)] for char in digits if char.isdigit())
+
+    parts: List[str] = []
+    for index in range(len(groups) - 1, -1, -1):
+        if not groups[index]:
+            continue
+        parts.append(_tts_four_digit_number(groups[index]))
+        parts.append(_TTS_LARGE_NUMBER_UNITS[index])
+    return "".join(parts)
+
+
+_TTS_DECIMAL_RE = re.compile(
+    r"(?<![\d.])(?P<sign>-?)(?P<integer>(?:\d{1,3}(?:,\d{3})+|\d+))"
+    r"\.(?P<fraction>\d+)(?![\d.])"
+)
+
+
+def _tts_pronunciation_text(text: str) -> str:
+    """표시용 원문은 건드리지 않고 발음·검토된 호흡 경계만 보정한다.
+
+    예: ``3.99달러`` → ``삼쩜 구구 달러``. 소수부는 자릿값으로 묶어
+    읽지 않고 각 숫자를 차례로 읽는다.
+    """
+
+    # User-tested Typecast pronunciation. This string is for speech/cache only;
+    # display text must keep the actual product name, including historical names.
+    source = korean_speech_text((text or "").replace("돼지바", "되지바"))
+
+    def replace_decimal(match: re.Match) -> str:
+        integer = _tts_integer_number(match.group("integer"))
+        fraction = "".join(
+            _TTS_DIGIT_WORDS[int(digit)] for digit in match.group("fraction")
+        )
+        spoken = ("마이너스 " if match.group("sign") else "")
+        spoken += f"{integer}쩜 {fraction}"
+        if match.end() < len(source) and source[match.end()].isalpha():
+            spoken += " "
+        return spoken
+
+    return _TTS_DECIMAL_RE.sub(replace_decimal, source)
 
 
 def _blank_intro_end(dc: Dict) -> int:
@@ -1374,9 +1716,8 @@ def _intro_timing(intro_template_end: int, title_dur: int,
 
 def _place_intro_transition_click(dc: Dict, root: Path,
                                   intro_end: int) -> Dict:
-    """클릭음을 인트로 종료 직전에 두어 첫 컷 전환을 강조한다."""
+    """제목 끝에 클릭음을 두고 본문이 시작 가능한 종료 시점을 반환한다."""
 
-    start = max(0, int(intro_end) - _INTRO_CLICK_LEAD_US)
     found = _find_named_audio_segment(dc, _CLICK_SFX_MARKERS)
     added = False
     project = None
@@ -1387,9 +1728,20 @@ def _place_intro_transition_click(dc: Dict, root: Path,
                 "present": False,
                 "added": False,
                 "start": None,
+                "end": None,
                 "name": "",
                 "project": None,
             }
+        duration = max(
+            1,
+            int(
+                (template.get("seg", {}).get("target_timerange") or {}).get(
+                    "duration"
+                )
+                or 1
+            ),
+        )
+        start = max(0, int(intro_end) - _INTRO_CLICK_LEAD_US)
         cloned = _append_audio_clone(dc, template, start)
         segment = cloned["seg"]
         name = cloned["name"]
@@ -1398,14 +1750,25 @@ def _place_intro_transition_click(dc: Dict, root: Path,
     else:
         segment = found["seg"]
         name = found["material"].get("name") or ""
-        segment.setdefault("target_timerange", {})["start"] = start
+        target = segment.setdefault("target_timerange", {})
+        duration = max(1, int(target.get("duration") or 1))
+        start = max(0, int(intro_end) - _INTRO_CLICK_LEAD_US)
+        target["start"] = start
     return {
         "present": True,
         "added": added,
         "start": start,
+        "end": start + duration,
         "name": name,
         "project": project,
     }
+
+
+def _body_start_after_intro_click(intro_end: int, click: Dict) -> int:
+    """클릭이 있을 때만 종료 후 0.3초 여유를 보장한다."""
+    if click.get("end") is None:
+        return int(intro_end)
+    return max(int(intro_end), int(click["end"]) + _INTRO_CLICK_BODY_GAP_US)
 
 
 def _set_text_keep_style(main_mat: Dict, text: str) -> None:
@@ -1424,6 +1787,22 @@ def _set_text_keep_style(main_mat: Dict, text: str) -> None:
     for key in ("words", "current_words"):
         if isinstance(main_mat.get(key), dict):
             main_mat[key] = {"start_time": [], "end_time": [], "text": []}
+
+
+def _set_single_line_title_keep_style(main_mat: Dict, text: str) -> None:
+    """본문 제목은 한 문단으로 입력하고 넘친 부분만 네이티브 자동 개행한다.
+
+    인트로의 균형 잡힌 두 줄 분할을 재사용하거나 긴 제목을 축소하지 않는다.
+    기존 fixed_width/정렬/폰트는 보존하고, 박스가 없는 템플릿만 화면 내 폭을 둔다.
+    """
+    single_line = _single_line_title(text)
+    _set_text_keep_style(main_mat, single_line)
+    main_mat["line_feed"] = 1
+    main_mat["fixed_height"] = -1.0
+    main_mat["oneline_cutoff"] = False
+    if float(main_mat.get("fixed_width") or -1) <= 0:
+        main_mat["force_apply_line_max_width"] = True
+        main_mat.setdefault("line_max_width", 0.94)
 
 
 def _text_of(main_mat: Dict) -> str:
@@ -1532,10 +1911,9 @@ def _fill_intro_title_card(dc: Dict, title_text: str, intro_end: int,
 def _fill_titles(dc: Dict, title_text: str) -> int:
     """자리표시자('제목이 들어갑니다' 등) 텍스트 소재를 실제 제목으로 채웁니다."""
     n = 0
-    wrapped = _wrap_korean(title_text, _TITLE_MAX_CHARS)
     for m in (dc.get("materials") or {}).get("texts", []) or []:
         if any(ph in _text_of(m) for ph in _TITLE_PLACEHOLDERS):
-            _set_text_keep_style(m, wrapped)
+            _set_single_line_title_keep_style(m, title_text)
             n += 1
     return n
 
@@ -1670,6 +2048,21 @@ def _caption_safe_korean(text: str) -> str:
     return re.sub(r"[ \t]+", " ", translated).strip()
 
 
+def _caption_display_lines(lines: List[str]) -> List[str]:
+    """TTS 원문은 보존하고 화면에 렌더링할 문장부호만 정리한다.
+
+    온점은 자막에서 제거하되 소수점은 보존한다. 쉼표는 위치에 관계없이
+    화면에서 제거한다. 의미 단위 분할 및 TTS에는 문장부호 원문을 사용한다.
+    """
+
+    displayed: List[str] = []
+    for line in lines:
+        value = re.sub(r"(?<!\d)\.|\.(?!\d)", "", str(line or ""))
+        value = value.replace("。", "").replace(",", "").replace("，", "").strip()
+        displayed.append(value)
+    return displayed
+
+
 def _split_sentences(text: str) -> List[str]:
     """나레이션을 TTS 자연 발화 단위(문장/절)로 분할.
 
@@ -1689,6 +2082,10 @@ def _split_sentences(text: str) -> List[str]:
             continue
         if char in _QUOTE_PAIRS:
             quote_end = _QUOTE_PAIRS[char]
+            continue
+        if char == "." and index > 0 and index + 1 < len(text) \
+                and text[index - 1].isdigit() and text[index + 1].isdigit():
+            # 3.99 같은 소수점은 문장 종결점이 아니다.
             continue
         if char in ".!?…。":
             part = text[start:index + 1].strip()
@@ -1796,7 +2193,10 @@ def _caption_pages(text: str, line_limit: int = 22) -> List[List[str]]:
     hard_limit = line_limit + 2
     for clause in _split_caption_clauses(normalized):
         lines.extend(_balanced_clause_lines(clause, hard_limit))
-    return [lines[index:index + 2] for index in range(0, len(lines), 2)]
+    return [
+        _caption_display_lines(lines[index:index + 2])
+        for index in range(0, len(lines), 2)
+    ]
 
 
 def _plan_sentences(segments: List[Dict], cfg, tts_dir: Path,
@@ -1826,14 +2226,16 @@ def _plan_sentences(segments: List[Dict], cfg, tts_dir: Path,
     captions: List[Dict] = []
     audios: List[Dict] = []
     for sent in sentences:
+        tts_text = _tts_pronunciation_text(sent["text"])
         dur = None
         wav = None
         if use_tts:
             try:
-                from ..tts import synth_to_file
-                wav = _tts_cache_path(cfg, tts_dir, sent["text"])
+                from ..tts import normalize_wav_for_export, synth_to_file
+                wav = _tts_cache_path(cfg, tts_dir, tts_text)
                 existed = wav.is_file() and wav.stat().st_size > 44
-                dur = synth_to_file(cfg, sent["text"], wav)  # 있으면 재사용
+                dur = synth_to_file(cfg, tts_text, wav)  # 있으면 재사용
+                wav = normalize_wav_for_export(wav)
                 audio_ok += 1
                 if existed:
                     audio_reused += 1
@@ -1895,7 +2297,8 @@ def _plan_sentences(segments: List[Dict], cfg, tts_dir: Path,
                 }
             )
         audios.append({"seg": sent["seg"], "text": sent["text"],
-                       "start": cursor, "dur": dur, "wav": wav})
+                       "tts_text": tts_text, "start": cursor,
+                       "dur": dur, "wav": wav})
         cursor += dur + _TTS_GAP_US
 
     base = max(int(start_offset), 0)
@@ -1907,13 +2310,153 @@ def _plan_sentences(segments: List[Dict], cfg, tts_dir: Path,
             "first_err": first_err}
 
 
+def _require_complete_tts(plan: Dict) -> None:
+    if not plan.get("use_tts"):
+        return
+    audios = plan.get("audios") or []
+    missing = [a for a in audios if not a.get("wav") or not Path(a["wav"]).is_file()]
+    if plan.get("audio_fail") or missing or not audios:
+        raise ValueError(
+            "본문 TTS가 누락되어 내보내기를 중단했습니다. "
+            + str(plan.get("first_err") or "음성 파일을 다시 확인하세요."))
+
+
+def export_config_signature(cfg) -> str:
+    # Include all synthesis options, but never serialize the API key.
+    key = f"{bool(cfg and getattr(cfg, 'enabled', False))}|{_tts_cache_path(cfg, Path('.'), 'export-contract').name}"
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def prepare_body_plan(guide: Dict, cfg, cache_root: Path) -> Dict:
+    segments = [s for s in guide.get("segments", [])
+                if (s.get("narration") or s.get("caption") or "").strip()]
+    if not segments:
+        raise ValueError("내보낼 대사가 없습니다.")
+    plan = _plan_sentences(segments, cfg, cache_root, start_offset=0)
+    _require_complete_tts(plan)
+    # JSON-safe immutable timing snapshot. Commit offsets it by title length,
+    # but never re-estimates or regenerates body speech.
+    for audio in plan["audios"]:
+        if audio.get("wav"):
+            audio["wav"] = str(audio["wav"])
+    return plan
+
+
+def plan_cut_durations(guide: Dict, plan: Dict) -> Dict[str, int]:
+    segments = [s for s in guide.get("segments", [])
+                if (s.get("narration") or s.get("caption") or "").strip()]
+    spans: Dict[int, List[int]] = {}
+    for unit in plan["captions"]:
+        start, end = unit["start"], unit["start"] + unit["dur"]
+        span = spans.setdefault(unit["seg"], [start, end])
+        span[:] = [min(span[0], start), max(span[1], end)]
+    durations = {}
+    for i, segment in enumerate(segments):
+        if i not in spans:
+            continue
+        start, end = spans[i]
+        duration = max(end - start, 400_000)
+        count = _guide_cut_count(segment)
+        edges = _cut_ratio_edges(segment, count)
+        for j in range(count):
+            durations[f"s{int(segment.get('index', i)):03d}-c{j:02d}"] = max(
+                300_000, round(edges[j + 1] * duration) - round(edges[j] * duration))
+    return durations
+
+
+def prepare_guide_tts_timing(
+    guide: Dict,
+    cfg,
+    tts_out_dir: str,
+) -> tuple[Dict, Dict]:
+    """Pre-generate body TTS and replace estimated guide timing with WAV timing.
+
+    The cache path and sentence splitting intentionally match ``_plan_sentences``
+    so the later CapCut export reuses the exact same files without another paid
+    synthesis request.
+    """
+
+    prepared = copy.deepcopy(guide)
+    report = {
+        "status": "disabled",
+        "segments": 0,
+        "generated": 0,
+        "reused": 0,
+        "total_duration_sec": float(
+            prepared.get("total_duration_sec") or 0.0
+        ),
+    }
+    if not cfg or not getattr(cfg, "enabled", False):
+        return prepared, report
+
+    title = (prepared.get("title") or "shortly 대본").strip()
+    tts_dir = Path(tts_out_dir) / _safe_folder(title)
+    from ..tts import synth_to_file
+
+    cursor = 0
+    measured = 0
+    for segment in prepared.get("segments") or []:
+        narration = _caption_safe_korean(
+            (segment.get("narration") or segment.get("caption") or "").strip()
+        )
+        sentences = _split_sentences(narration)
+        if not sentences:
+            continue
+        durations: List[int] = []
+        for sentence in sentences:
+            tts_text = _tts_pronunciation_text(sentence)
+            wav = _tts_cache_path(cfg, tts_dir, tts_text)
+            existed = wav.is_file() and wav.stat().st_size > 44
+            durations.append(synth_to_file(cfg, tts_text, wav))
+            if existed:
+                report["reused"] += 1
+            else:
+                report["generated"] += 1
+        duration = sum(durations) + _TTS_GAP_US * max(0, len(durations) - 1)
+        original_duration = float(segment.get("duration_sec") or 0.0)
+        segment["start_sec"] = round(cursor / _US, 4)
+        segment["duration_sec"] = round(duration / _US, 4)
+        segment["end_sec"] = round((cursor + duration) / _US, 4)
+        segment["timing_source"] = "typecast_tts"
+        tts = dict(segment.get("tts") or {})
+        tts["estimated_duration_sec"] = original_duration
+        tts["measured_duration_sec"] = round(duration / _US, 4)
+        segment["tts"] = tts
+        cursor += duration + _TTS_GAP_US
+        measured += 1
+
+    if measured:
+        total = max(0, cursor - _TTS_GAP_US)
+        prepared["total_duration_sec"] = round(total / _US, 4)
+        report.update(
+            {
+                "status": "measured",
+                "segments": measured,
+                "total_duration_sec": round(total / _US, 4),
+                "tts_dir": str(tts_dir),
+            }
+        )
+        prepared["tts_timing"] = {
+            "status": "measured",
+            "segments": measured,
+            "total_duration_sec": round(total / _US, 4),
+        }
+    return prepared, report
+
+
 def _build_caption_seg(style_seg: Dict, src_mats: Dict, text: str,
                        start_us: int, dur_us: int, y: Optional[float],
-                       render_index: int, scale: Optional[float] = None):
+                       render_index: int, scale: Optional[float] = None,
+                       line_spacing: Optional[float] = None):
     """자막/메모 세그먼트 생성. y 가 None 이면 원본(예시) 세그먼트의 위치를 그대로 사용."""
+    # Previously prepared caption plans may still contain punctuation. Clean at
+    # the rendering boundary as well, without mutating their TTS source text.
+    text = "\n".join(_caption_display_lines(text.split("\n")))
     seg, cloned, main = _clone_seg(style_seg, src_mats)
     if main is not None:
         _set_text_keep_style(main, text)
+        if line_spacing is not None:
+            main["line_spacing"] = float(line_spacing)
     seg["target_timerange"] = {"start": start_us, "duration": dur_us}
     seg["source_timerange"] = None
     if y is not None:
@@ -1932,6 +2475,8 @@ def _build_caption_seg(style_seg: Dict, src_mats: Dict, text: str,
 def _build_audio_seg(audio_tpl: Dict, wav_path: Path, start_us: int,
                      dur_us: int):
     seg, cloned, main = _clone_seg(audio_tpl["seg"], audio_tpl["materials"])
+    if main is None or not wav_path.is_file() or dur_us <= 0:
+        raise ValueError("TTS 음성 또는 오디오 소재를 연결하지 못했습니다.")
     if main is not None:
         main["path"] = str(wav_path).replace("\\", "/")
         main["duration"] = dur_us
@@ -2048,9 +2593,79 @@ def _reclone_project_ids(proj_dir: Path, dc: Dict, orig_main_id,
 def export_via_template(guide: Dict,
                         root_override: Optional[str] = None,
                         template_name: str = "챙맛 템플릿",
+                        tts_cfg=None, tts_out_dir: Optional[str] = None,
+                        cut_assets: Optional[Dict[str, Dict]] = None,
+                        body_plan: Optional[Dict] = None,
+                        validator=None) -> Dict:
+    """Build outside CapCut's project list; publish only a complete project."""
+    root = find_capcut_draft_root(root_override)
+    if root is None:
+        return {"ok": False, "reason": "CapCut 프로젝트 폴더를 찾을 수 없습니다."}
+    root = root.resolve()
+    # Same volume as the destination, outside the directory CapCut enumerates.
+    staging_parent = root.resolve().parent / ".shortly-staging"
+    staging_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="export-", dir=staging_parent) as temporary:
+        staged = Path(temporary) / "project"
+        try:
+            result = _export_via_template_impl(
+                guide, root_override=str(root), template_name=template_name,
+                tts_cfg=tts_cfg, tts_out_dir=tts_out_dir, cut_assets=cut_assets,
+                body_plan=body_plan, staging_dir=staged)
+            if not result.get("ok"):
+                return {"ok": False, "reason": result.get("reason", "내보내기 실패")}
+            if validator is not None:
+                validation = validator(staged)
+                if not validation["passed"]:
+                    return {"ok": False, "reason": "프로젝트 검증에 실패했습니다. 완성본을 생성하지 않았습니다.",
+                            "validation": validation}
+                result["validation"] = validation
+            name = _safe_folder(str(guide.get("title") or "shortly 대본"))
+            destination = root / name
+            if destination.exists():
+                destination = root / f"{name}_{time.strftime('%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            old_path, new_path = str(staged).replace("\\", "/"), str(destination).replace("\\", "/")
+
+            def relocate(value):
+                if isinstance(value, str):
+                    return value.replace(str(staged), str(destination)).replace(old_path, new_path)
+                if isinstance(value, list):
+                    return [relocate(v) for v in value]
+                if isinstance(value, dict):
+                    return {k: relocate(v) for k, v in value.items()}
+                return value
+
+            for file in staged.rglob("*.json"):
+                write_json(file, relocate(_read_json(file)))
+            result = relocate(result)
+            result["project_name"] = destination.name
+            meta = _read_json(staged / "draft_meta_info.json")
+            # Windows rename refuses an existing destination; never overwrite
+            # a concurrent export or a user's edited project.
+            staged.rename(destination)
+        except Exception as exc:
+            log.warning("CapCut 내보내기 중단: %s", exc)
+            return {"ok": False, "reason": f"내보내기를 완료하지 못했습니다: {exc}"}
+        try:
+            result["registered"] = _register_in_root(
+                root, meta, meta["draft_id"], new_path, str(root).replace("\\", "/"),
+                str(guide.get("title") or name), int(time.time() * _US),
+                int(meta.get("tm_duration") or 0))
+        except Exception:
+            result["registered"] = False
+        if not result["registered"]:
+            result["registration_warning"] = "프로젝트는 완성됐지만 CapCut 목록 등록에 실패했습니다. 프로젝트 경로에서 확인하세요."
+        return result
+
+
+def _export_via_template_impl(guide: Dict,
+                        root_override: Optional[str] = None,
+                        template_name: str = "챙맛 템플릿",
                         tts_cfg=None,
                         tts_out_dir: Optional[str] = None,
-                        cut_assets: Optional[Dict[str, Dict]] = None) -> Dict:
+                        cut_assets: Optional[Dict[str, Dict]] = None,
+                        body_plan: Optional[Dict] = None,
+                        staging_dir: Optional[Path] = None) -> Dict:
     """기존 '템플릿' 프로젝트를 복사한 뒤, 그 복사본에만 제목/자막/추천 메모/TTS
     오디오를 채워 넣습니다. 원본 템플릿은 절대 수정하지 않습니다.
 
@@ -2081,10 +2696,9 @@ def export_via_template(guide: Dict,
 
     # 1) 템플릿 폴더 복사(원본 미수정)
     folder_name = _safe_folder(title)
-    proj_dir = root / folder_name
-    if proj_dir.exists():
-        folder_name = f"{folder_name}_{time.strftime('%m%d_%H%M%S')}"
-        proj_dir = root / folder_name
+    if staging_dir is None:
+        raise ValueError("An isolated staging directory is required")
+    proj_dir = staging_dir
     try:
         shutil.copytree(tpl_dir, proj_dir)
     except (OSError, shutil.Error) as exc:
@@ -2116,18 +2730,18 @@ def export_via_template(guide: Dict,
     title_reused = False
     if tts_enabled and title_text:
         try:
-            from ..tts import synth_to_file
-            title_tts_text = _title_for_tts(title_text)
+            from ..tts import normalize_wav_for_export, synth_to_file
+            title_tts_text = _tts_pronunciation_text(_title_for_tts(title_text))
             title_wav = _tts_cache_path(tts_cfg, tts_dir, title_tts_text,
                                         prefix="title")
             title_reused = title_wav.is_file() and \
                 title_wav.stat().st_size > 44
             title_dur = synth_to_file(tts_cfg, title_tts_text, title_wav)
-        except Exception as exc:  # noqa: BLE001 - 실패 시 인트로는 템플릿 길이 유지
-            log.warning("제목 TTS 실패: %s", exc)
-            title_wav = None
-            title_dur = 0
-            title_reused = False
+            title_wav = normalize_wav_for_export(title_wav)
+            if title_dur <= 0 or not title_wav.is_file():
+                raise ValueError("제목 음성 파일이 없거나 길이가 올바르지 않습니다.")
+        except Exception as exc:
+            raise ValueError(f"제목 TTS 생성 실패. 음성 없이 내보내지 않습니다: {exc}") from exc
 
     # 시작음 뒤에 제목 TTS가 시작되도록 해 두 소리가 겹치지 않게 한다.
     title_audio_start, intro_dur = _intro_timing(
@@ -2136,13 +2750,25 @@ def export_via_template(guide: Dict,
         start_sfx["end"],
     )
 
+    # 클릭음이 본문 첫 음성과 겹치지 않도록 본문 시작점을 클릭 종료 뒤로 민다.
+    transition_click = _place_intro_transition_click(dc, root, intro_dur)
+    intro_dur = _body_start_after_intro_click(intro_dur, transition_click)
+
     # 2-2) 문장(절) 단위 TTS + 자막 조각 계획 — 인트로 이후부터 배치
     #      TTS 는 문장 단위(자연 발화), 자막은 그 안에서 짧은 조각으로 노출.
-    plan = _plan_sentences(segments, tts_cfg, tts_dir, start_offset=intro_dur)
+    if body_plan is None:
+        plan = _plan_sentences(segments, tts_cfg, tts_dir, start_offset=intro_dur)
+    else:
+        plan = copy.deepcopy(body_plan)
+        plan["audio_reused"] = plan.get("audio_ok", 0)
+        for key in ("captions", "audios"):
+            for item in plan[key]:
+                item["start"] += intro_dur
+        plan["total_us"] += intro_dur
+    _require_complete_tts(plan)
     units = plan["captions"]
     total_us = plan["total_us"]
     if not units:
-        shutil.rmtree(proj_dir, ignore_errors=True)
         return {"ok": False, "reason": "자막 단위를 만들지 못했습니다."}
 
     # 3) 인트로 제목 카드(시작부에 제목이 한 번 더 크게 뜨는 부분) 먼저 채우고,
@@ -2157,7 +2783,6 @@ def export_via_template(guide: Dict,
     filled = _fill_titles(dc, title_text) if title_text else 0
     _extend_full_segments(dc, template_dur, total_us)
     _extend_intro_segments(dc, intro_template_end, intro_dur)
-    transition_click = _place_intro_transition_click(dc, root, intro_dur)
 
     # 3-1) 자막 위치/크기: 템플릿에 넣어둔 '자막 예시'가 있으면 그대로 따른다
     sample = _find_caption_sample(dc)
@@ -2193,7 +2818,8 @@ def export_via_template(guide: Dict,
             #  가독성 판단이 필요해 수동 편집에 맡긴다.)
             cseg, cloned = _build_caption_seg(
                 cap_style_seg, mats, u["text"],
-                u["start"], u["dur"], cap_y, render_index=20000 + k)
+                u["start"], u["dur"], cap_y, render_index=20000 + k,
+                line_spacing=_CAPTION_LINE_SPACING)
             _merge_materials(mats, cloned)
             caption_segs.append(cseg)
             caption_layers.setdefault(int(u.get("layer") or 0), []).append(cseg)
@@ -2208,12 +2834,13 @@ def export_via_template(guide: Dict,
             imgs = s.get("image_suggestions") or []
             media = s.get("media_suggestions") or []
             effs = s.get("effect_suggestions") or []
-            n_cuts = max(len(imgs), int(s.get("cuts_suggested") or 0), 1)
+            n_cuts = _guide_cut_count(s)
+            cut_edges = _cut_ratio_edges(s, n_cuts)
             st, en = seg_span[i]
             span = max(en - st, 400_000)
             for c in range(n_cuts):
-                c_start = st + int(round(c * span / n_cuts))
-                c_end = st + int(round((c + 1) * span / n_cuts))
+                c_start = st + int(round(cut_edges[c] * span))
+                c_end = st + int(round(cut_edges[c + 1] * span))
                 c_dur = max(300_000, c_end - c_start)
                 img = _pick(imgs, c)
                 med = _pick(media, c)
@@ -2233,8 +2860,8 @@ def export_via_template(guide: Dict,
                 _merge_materials(mats, cloned_r)
                 reco_segs.append(rseg)
 
-    # 5) 선택된 생성 에셋. 원본 종횡비를 유지하고, 지정 레퍼런스 프로젝트의
-    # 수동 조정 분포를 기준으로 하되 두 줄 자막 안전 영역만큼 축소·하향한다.
+    # 5) 선택된 에셋. 원본을 보존하고 공통 본문 영역 안에 전체 보기로 배치.
+    # 레퍼런스에서는 소재 구조만 사용하며 배율·마스크는 복제하지 않는다.
     cut_segs: List[Dict] = []
     disclosure_segs: List[Dict] = []
     disclosure_template = (
@@ -2258,10 +2885,8 @@ def export_via_template(guide: Dict,
             if i not in seg_span:
                 continue
             segment_index = int(segment.get("index", i))
-            n_cuts = max(
-                1,
-                min(int(segment.get("cuts_suggested") or 1), 6),
-            )
+            n_cuts = _guide_cut_count(segment)
+            cut_edges = _cut_ratio_edges(segment, n_cuts)
             start, end = seg_span[i]
             duration = max(end - start, 400_000)
             for cut_index in range(n_cuts):
@@ -2277,10 +2902,8 @@ def export_via_template(guide: Dict,
                 )
                 target = cuts_dir / f"cut_{cut_no:02d}{suffix}"
                 shutil.copy2(source, target)
-                cut_start = start + int(round(cut_index * duration / n_cuts))
-                cut_end = start + int(
-                    round((cut_index + 1) * duration / n_cuts)
-                )
+                cut_start = start + int(round(cut_edges[cut_index] * duration))
+                cut_end = start + int(round(cut_edges[cut_index + 1] * duration))
                 cut_duration = max(300_000, cut_end - cut_start)
                 width, height = _asset_dimensions(target, media_kind)
                 scale, transform_y = _reference_asset_layout(
@@ -2338,7 +2961,9 @@ def export_via_template(guide: Dict,
     audio_tpl = None
     need_audio = bool(title_wav) or plan["audio_ok"] > 0
     if need_audio:
-        audio_tpl = _find_audio_template(root, exclude=proj_dir.name)
+        audio_tpl = _find_audio_template(root)
+        if tts_enabled and audio_tpl is None:
+            raise ValueError("TTS를 삽입할 오디오 템플릿이 없습니다. 음성이 있는 CapCut 레퍼런스를 확인하세요.")
         if audio_tpl is not None:
             if title_wav and Path(title_wav).is_file():
                 aseg, cloned_a = _build_audio_seg(
@@ -2354,7 +2979,7 @@ def export_via_template(guide: Dict,
                 if not a.get("wav") or not Path(a["wav"]).is_file():
                     continue
                 aseg, cloned_a = _build_audio_seg(
-                    audio_tpl, a["wav"], a["start"], a["dur"])
+                    audio_tpl, Path(a["wav"]), a["start"], a["dur"])
                 _merge_materials(mats, cloned_a)
                 audio_segs.append(aseg)
 
@@ -2410,8 +3035,7 @@ def export_via_template(guide: Dict,
     })
     write_json(meta_path, meta)
 
-    registered = _register_in_root(root, meta, draft_id, fold_path,
-                                   root_path, title, now_us, total_us)
+    registered = False  # only the public wrapper publishes completed projects
 
     return {
         "ok": True,

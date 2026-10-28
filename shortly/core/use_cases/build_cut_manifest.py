@@ -14,7 +14,7 @@ from ..domain.assets import (
     MediaKind,
 )
 
-ASSET_CLASSIFIER_VERSION = 5
+ASSET_CLASSIFIER_VERSION = 6
 
 AI_PERSON_IMAGE_DISCLOSURE = (
     "이 이미지는 이해를 돕기 위한 AI 생성\n"
@@ -24,6 +24,31 @@ AI_PERSON_VIDEO_DISCLOSURE = (
     "이 영상은 이해를 돕기 위한 AI 생성\n"
     "영상이며, 실존 인물이 아닙니다."
 )
+
+
+def _guide_cut_count(segment: Mapping[str, Any]) -> int:
+    sentence_count = max(1, int(segment.get("sentence_count") or 1))
+    sentence_cap = min(sentence_count * 3, 18)
+    return max(1, min(int(segment.get("cuts_suggested") or 1), sentence_cap))
+
+
+def _cut_ratio_edges(
+    segment: Mapping[str, Any],
+    cut_count: int,
+) -> list[float]:
+    raw = segment.get("cut_change_ratios")
+    if isinstance(raw, list) and len(raw) == cut_count - 1:
+        try:
+            changes = [float(value) for value in raw]
+        except (TypeError, ValueError):
+            changes = []
+        if (
+            len(changes) == cut_count - 1
+            and all(0.0 < value < 1.0 for value in changes)
+            and changes == sorted(changes)
+        ):
+            return [0.0, *changes, 1.0]
+    return [index / cut_count for index in range(cut_count + 1)]
 
 _FACT_TERMS = (
     "실제",
@@ -113,6 +138,37 @@ _EXACT_SOURCE_TERMS = (
     "브랜드",
     "포장지",
     "공식",
+)
+_PRODUCT_IDENTITY_SUPPRESSION_TERMS = (
+    "무지 용기",
+    "무지 흰색",
+    "무지 컵",
+    "무지 포장",
+    "로고 없음",
+    "로고·문자 없음",
+    "글자·로고 없음",
+    "브랜드 없음",
+    "브랜드 외형 없이",
+    "실제 브랜드 외형은 쓰지 않음",
+    "실제 브랜드 외형을 쓰지 않음",
+    "실제 브랜드 외형 없이",
+    "generic packaging",
+    "blank packaging",
+    "unbranded",
+)
+_PRODUCT_VISUAL_TERMS = (
+    "제품",
+    "포장",
+    "포장지",
+    "컵라면",
+    "용기면",
+    "라면 용기",
+    "사각 용기",
+    "과자",
+    "음료병",
+    "제품 병",
+    "제품 캔",
+    "제품 상자",
 )
 _KOREAN_LOCAL_CONTEXT_TERMS = (
     "한국인",
@@ -274,6 +330,22 @@ def _fictional_person_prompt() -> str:
     )
 
 
+def _generated_product_identity_is_suppressed(
+    *,
+    prompt: str,
+    narration: str,
+    reason: str = "",
+) -> bool:
+    """Detect generated stand-ins that erase a product central to the story."""
+
+    production_context = " ".join((prompt, reason))
+    story_context = " ".join((prompt, narration, reason))
+    return (
+        _contains(production_context, _PRODUCT_IDENTITY_SUPPRESSION_TERMS)
+        and _contains(story_context, _PRODUCT_VISUAL_TERMS)
+    )
+
+
 def classify_asset_type(
     *,
     prompt: str,
@@ -367,7 +439,8 @@ def build_cut_manifest(
     overrides = overrides or {}
     for segment_position, segment in enumerate(guide.get("segments") or []):
         segment_index = int(segment.get("index", segment_position))
-        cut_count = max(1, min(int(segment.get("cuts_suggested") or 1), 6))
+        cut_count = _guide_cut_count(segment)
+        cut_edges = _cut_ratio_edges(segment, cut_count)
         start_sec = float(segment.get("start_sec") or 0.0)
         duration_sec = max(float(segment.get("duration_sec") or 0.0), 0.0)
         for cut_index in range(cut_count):
@@ -533,6 +606,38 @@ def build_cut_manifest(
                         fact_sensitive=segment.get("fact_sensitive"),
                     )
                 )
+            if (
+                asset_type
+                in (
+                    AssetType.GENERATED_IMAGE,
+                    AssetType.GENERATED_VIDEO,
+                    AssetType.MANUAL_REQUIRED,
+                )
+                and _generated_product_identity_is_suppressed(
+                    prompt=prompt,
+                    narration=str(segment.get("narration") or ""),
+                    reason=str(model_reason or ""),
+                )
+            ):
+                original_media_kind = media_kind
+                asset_type = AssetType.MANUAL_REQUIRED
+                media_kind = (
+                    MediaKind.VIDEO
+                    if original_media_kind is MediaKind.VIDEO
+                    or _contains(media_hint, _VIDEO_TERMS)
+                    else MediaKind.IMAGE
+                )
+                fact_sensitive = True
+                disclosure_requested = False
+                stock_query = ""
+                notes.extend(
+                    [
+                        "이야기의 실제 제품을 무지·무브랜드 대체품으로 바꾸는 "
+                        "자동 생성을 차단했습니다.",
+                        "실제 제품 사진을 참조로 제공해 포장과 용기 외형을 "
+                        "보존하는 수동 생성 또는 원본 삽입이 필요합니다.",
+                    ]
+                )
             if cut_id in overrides:
                 requested_type = AssetType(overrides[cut_id])
                 if fact_sensitive and requested_type in (
@@ -569,8 +674,8 @@ def build_cut_manifest(
                 AssetType.GENERATED_IMAGE,
                 AssetType.GENERATED_VIDEO,
             )
-            cut_start = start_sec + duration_sec * cut_index / cut_count
-            cut_end = start_sec + duration_sec * (cut_index + 1) / cut_count
+            cut_start = start_sec + duration_sec * cut_edges[cut_index]
+            cut_end = start_sec + duration_sec * cut_edges[cut_index + 1]
             cuts.append(
                 CutSpec(
                     id=cut_id,

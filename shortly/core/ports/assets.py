@@ -11,9 +11,32 @@ from ..domain.assets import MediaKind
 class AssetGenerationError(RuntimeError):
     """Normalized generation failure safe for job-state handling."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "generation_failed",
+        retryable: Optional[bool] = None,
+        recommended_action: str = "",
+        http_status: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.recommended_action = recommended_action
+        self.http_status = http_status
+
 
 class ProviderUnavailableError(AssetGenerationError):
     """The configured optional provider cannot be used."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            code="provider_unavailable",
+            retryable=False,
+            recommended_action="check_settings",
+        )
 
 
 @dataclass(frozen=True)
@@ -29,11 +52,14 @@ class ImageGenerationRequest:
 @dataclass(frozen=True)
 class VideoGenerationRequest:
     prompt: str
-    model: str = "gemini-omni-flash-preview"
+    model: str = "gemini-omni-1.1-flash"
     aspect_ratio: str = "9:16"
+    duration_seconds: int = 4
     source_image: Optional[bytes] = None
     source_image_mime_type: Optional[str] = None
     idempotency_key: str = ""
+    end_image: Optional[bytes] = None
+    end_image_mime_type: Optional[str] = None
 
 
 @dataclass(frozen=True)

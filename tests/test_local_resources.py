@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from shortly.apps.personal.local_llm import AutoUnloadingLocalClient
 from shortly.apps.personal.local_resources import LocalModelResourceManager
@@ -31,6 +32,11 @@ class _ResourceManager:
 
     def __init__(self) -> None:
         self.models: list[str] = []
+        self.ready: list[str] = []
+
+    def ensure_ready(self, model: str) -> bool:
+        self.ready.append(model)
+        return True
 
     def unload(self, model: str) -> bool:
         self.models.append(model)
@@ -110,12 +116,14 @@ class LocalResourceTests(unittest.TestCase):
             chat=SimpleNamespace(completions=_Completions())
         )
         client._auto_unload = True
+        client._auto_start = True
         manager = _ResourceManager()
         client._resource_manager = manager
 
         value = client.complete_json("system", "user")
 
         self.assertEqual(value, {"passed": True})
+        self.assertEqual(manager.ready, ["fixture-model"])
         self.assertEqual(manager.models, ["fixture-model"])
 
     def test_failed_local_request_still_releases_model(self) -> None:
@@ -134,6 +142,7 @@ class LocalResourceTests(unittest.TestCase):
             chat=SimpleNamespace(completions=_Failure())
         )
         client._auto_unload = True
+        client._auto_start = True
         manager = _ResourceManager()
         client._resource_manager = manager
 
@@ -141,6 +150,80 @@ class LocalResourceTests(unittest.TestCase):
             client.complete_json("system", "user")
 
         self.assertEqual(manager.models, ["fixture-model"])
+
+    def test_lmstudio_start_failure_is_reported_as_unavailable(self) -> None:
+        class _StartFailure(_ResourceManager):
+            def ensure_ready(self, model: str) -> bool:
+                raise RuntimeError("offline")
+
+        client = AutoUnloadingLocalClient.__new__(
+            AutoUnloadingLocalClient
+        )
+        client.text_model = "fixture-model"
+        client.vision_model = "fixture-model"
+        client._base_url = "http://localhost:1234/v1"
+        client._auto_start = True
+        client._auto_unload = True
+        client._resource_manager = _StartFailure()
+
+        with self.assertRaises(Exception) as raised:
+            client.complete_json("system", "user")
+
+        self.assertEqual(type(raised.exception).__name__, "LLMUnavailable")
+
+    def test_lmstudio_starts_server_and_loads_requested_model(self) -> None:
+        calls: list[list[str]] = []
+        responses = [
+            RuntimeError("offline"),
+            {"models": []},
+            {"models": []},
+            {
+                "models": [
+                    {
+                        "key": "qwen/qwen3.6-27b",
+                        "loaded_instances": [
+                            {"id": "qwen/qwen3.6-27b"},
+                        ],
+                    }
+                ]
+            },
+        ]
+
+        def transport(method, url, payload, headers):
+            value = responses.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        def runner(command, timeout):
+            calls.append(command)
+
+        manager = LocalModelResourceManager(
+            "http://localhost:1234/v1",
+            runtime="lmstudio",
+            transport=transport,
+            command_runner=runner,
+            startup_timeout=5,
+        )
+
+        with patch(
+            "shortly.apps.personal.local_resources._find_lms_cli",
+            return_value="lms",
+        ):
+            self.assertTrue(manager.ensure_ready("qwen/qwen3.6-27b"))
+
+        self.assertEqual(calls[0][:3], ["lms", "server", "start"])
+        self.assertEqual(
+            calls[1],
+            [
+                "lms",
+                "load",
+                "qwen/qwen3.6-27b",
+                "--identifier",
+                "qwen/qwen3.6-27b",
+                "-y",
+            ],
+        )
 
 
 if __name__ == "__main__":

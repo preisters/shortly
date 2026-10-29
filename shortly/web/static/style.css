@@ -133,6 +133,19 @@ button.download.capcut-export:disabled { opacity: .6; cursor: default; }
 }
 .g-input-orig-label { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
 .g-input-orig-text { font-size: 13.5px; white-space: pre-wrap; line-height: 1.5; }
+.quality-notice {
+  display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+  white-space: normal; line-height: 1.45;
+}
+.quality-notice b { font-size: 13px; }
+.quality-notice span { color: var(--muted); font-size: 12.5px; }
+.quality-notice.ok {
+  border-color: rgba(52, 211, 153, .45); background: rgba(52, 211, 153, .08);
+}
+.quality-notice.warn {
+  border-color: rgba(251, 191, 36, .45); background: rgba(251, 191, 36, .08);
+}
 .guide-list .g-delete {
   flex: none; padding: 6px 12px; font-size: 12.5px;
   background: #2a2f3a; color: var(--err);

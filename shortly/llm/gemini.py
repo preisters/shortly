@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import LLMClient, LLMError, LLMUnavailable
+from .base import LLMClient, LLMUnavailable, normalize_provider_error
 
 
 class GeminiClient(LLMClient):
@@ -41,7 +41,7 @@ class GeminiClient(LLMClient):
             )
             return (resp.text or "").strip()
         except Exception as exc:  # noqa: BLE001
-            raise LLMError(f"Gemini 호출 실패: {exc}") from exc
+            raise normalize_provider_error("gemini", exc) from exc
 
     def describe_image(self, image_path: Path, prompt: str,
                        temperature: float = 0.4, max_tokens: int = 1024) -> str:
@@ -55,4 +55,6 @@ class GeminiClient(LLMClient):
             )
             return (resp.text or "").strip()
         except Exception as exc:  # noqa: BLE001
-            raise LLMError(f"Gemini 비전 호출 실패: {exc}") from exc
+            raise normalize_provider_error(
+                "gemini", exc, operation="비전 호출"
+            ) from exc

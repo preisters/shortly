@@ -79,7 +79,7 @@
           </select>
         </label>
         <label id="lbl-gen-model" style="display:none">생성 모델명
-          <input id="set-gen-model" type="text" placeholder="예: claude-opus-4-8" style="width:220px" />
+          <input id="set-gen-model" type="text" placeholder="예: claude-opus-5" style="width:220px" />
         </label>
         <input id="set-gen-key" type="password" class="grow" placeholder="생성 AI의 API 키(이미 저장돼 있으면 비워두세요)" style="display:none" />
       </div>
@@ -146,6 +146,16 @@
         <label><input type="radio" name="mode" value="script" /> 완성 대본(스타일 보정)</label>
       </div>
       <textarea id="guide-text" rows="4" placeholder="주제 또는 대본을 입력하세요"></textarea>
+      <div id="required-content-wrap">
+        <label for="required-content"><strong>대본 필수 포함 내용</strong> (선택)</label>
+        <p class="hint">필수 사실·장면·전개를 한 줄에 하나씩 적으세요. 모든 항목을 보존합니다. 생략 가능한 내용은 '분량이 허용된다면' 또는 '선택 사항'으로 표시하세요. 항목이 많으면 조사 시간·비용이 늘고 목표 분량과 충돌할 수 있습니다.</p>
+        <textarea id="required-content" rows="4" placeholder="전 세계 판매량 10개 중 4개가 러시아에서 팔렸다는 수치&#10;러시아의 차와 케이크 문화&#10;수요 확인 뒤 현지 생산체제를 구축한 과정"></textarea>
+      </div>
+      <div id="research-focus-wrap">
+        <label for="research-focus"><strong>추가 조사 항목</strong> (선택)</label>
+        <p class="hint">따로 검색할 쟁점을 한 줄에 하나씩 적으세요. 모든 항목을 별도 검색 대상으로 보존하며 검색어는 짧게 정리합니다. 항목이 많으면 조사 시간·비용이 늘어납니다. URL 전체·PDF 본문 열람은 보장하지 않으므로 중요한 출처 내용은 주제에 붙여 넣으세요.</p>
+        <textarea id="research-focus" rows="3" placeholder="베트남 설 제사의 의미와 실제 상차림&#10;제사상에 초코파이가 올라간다는 근거&#10;과자탑이 전통인지 현대 연출인지"></textarea>
+      </div>
       <div class="row">
         <button id="btn-guide">가이드 생성</button>
       </div>

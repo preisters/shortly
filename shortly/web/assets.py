@@ -21,6 +21,10 @@ def render_index(path: Path, product: ProductKind) -> str:
         return html
     start = html.find(_LOCAL_START)
     end = html.find(_LOCAL_END)
+    # Portable team artifacts materialize the sanitized page at build time.
+    # Treat an already-sanitized page as valid so rendering remains idempotent.
+    if start < 0 and end < 0:
+        return html
     if start < 0 or end < 0 or end < start:
         raise RuntimeError("팀 UI를 생성할 로컬 기능 경계 마커가 없습니다.")
     end += len(_LOCAL_END)

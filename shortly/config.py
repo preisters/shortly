@@ -146,13 +146,13 @@ class Settings:
     anthropic_api_key: str = ""
     typecast_api_key: str = ""
 
-    # TTS(Typecast) 기본값 — 캐릭터 '지훈', 1.3배속, toneup 100%
-    tts_voice_id: str = "tc_61f0859907085fc68561c9a1"
+    # 2026-10-18 사용자 기본값 — 김건, 1.1배속, toneup 100%
+    tts_voice_id: str = "tc_61c2f7741330d213c238cba6"
     tts_model: str = "ssfm-v30"
     tts_language: str = "kor"
     tts_emotion: str = "toneup"
     tts_intensity: float = 1.0
-    tts_tempo: float = 1.3
+    tts_tempo: float = 1.2
     # TTS 음성 파일 저장 위치(프로젝트별 하위 폴더가 이 아래에 생성됨)
     tts_output_dir: Path = field(
         default_factory=lambda: Path(r"d:\youtube\챙 브랜드\챙맛\TTS"))
@@ -164,6 +164,8 @@ class Settings:
     local_api_key: str = "ollama"
     # Qwen3 등 reasoning 모델의 thinking 을 꺼서 속도·토큰 절약(기본 켬)
     local_no_think: bool = True
+    # 로컬 LM Studio 서버가 꺼져 있으면 CLI로 서버와 요청 모델을 자동 준비
+    local_auto_start: bool = True
     # 로컬 호출 완료 직후 모델을 RAM/VRAM 에서 해제(개인판 기본 켬)
     local_auto_unload: bool = True
 
@@ -248,18 +250,21 @@ class Settings:
             openai_api_key=_env("OPENAI_API_KEY"),
             anthropic_api_key=_env("ANTHROPIC_API_KEY"),
             typecast_api_key=_env("TYPECAST_API_KEY"),
-            tts_voice_id=_env("SHORTLY_TTS_VOICE_ID") or "tc_61f0859907085fc68561c9a1",
+            tts_voice_id=_env("SHORTLY_TTS_VOICE_ID") or "tc_61c2f7741330d213c238cba6",
             tts_model=_env("SHORTLY_TTS_MODEL") or "ssfm-v30",
             tts_language=_env("SHORTLY_TTS_LANGUAGE") or "kor",
             tts_emotion=_env("SHORTLY_TTS_EMOTION") or "toneup",
             tts_intensity=_env_float("SHORTLY_TTS_INTENSITY", 1.0),
-            tts_tempo=_env_float("SHORTLY_TTS_TEMPO", 1.3),
+            tts_tempo=_env_float("SHORTLY_TTS_TEMPO", 1.2),
             tts_output_dir=Path(tts_out) if tts_out else Path(r"d:\youtube\챙 브랜드\챙맛\TTS"),
             capcut_template=_env("SHORTLY_CAPCUT_TEMPLATE") or "챙맛 템플릿",
             local_base_url=_env("SHORTLY_LOCAL_BASE_URL", "http://localhost:11434/v1")
             or "http://localhost:11434/v1",
             local_api_key=_env("SHORTLY_LOCAL_API_KEY", "ollama") or "ollama",
             local_no_think=_env("SHORTLY_LOCAL_NO_THINK", "1") not in ("0", "false", "False"),
+            local_auto_start=_env(
+                "SHORTLY_LOCAL_AUTO_START", "1"
+            ) not in ("0", "false", "False", ""),
             local_auto_unload=_env(
                 "SHORTLY_LOCAL_AUTO_UNLOAD", "1"
             ) not in ("0", "false", "False", ""),

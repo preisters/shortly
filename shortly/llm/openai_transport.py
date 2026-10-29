@@ -6,7 +6,14 @@ import base64
 from pathlib import Path
 from typing import Any
 
-from .base import LLMClient, LLMError, LLMUnavailable, parse_json_loose, strip_think
+from .base import (
+    LLMClient,
+    LLMError,
+    LLMUnavailable,
+    normalize_provider_error,
+    parse_json_loose,
+    strip_think,
+)
 
 
 class OpenAICompatibleClient(LLMClient):
@@ -75,7 +82,9 @@ class OpenAICompatibleClient(LLMClient):
             raw = message.content or getattr(message, "reasoning_content", "") or ""
             return strip_think(raw).strip()
         except Exception as exc:  # noqa: BLE001
-            raise LLMError(f"OpenAI 호출 실패: {exc}") from exc
+            if not self._base_url:
+                raise normalize_provider_error("openai", exc) from exc
+            raise LLMError(f"OpenAI-compatible 호출 실패: {exc}") from exc
 
     def complete_json(
         self,
@@ -156,4 +165,8 @@ class OpenAICompatibleClient(LLMClient):
             raw = message.content or getattr(message, "reasoning_content", "") or ""
             return strip_think(raw).strip()
         except Exception as exc:  # noqa: BLE001
-            raise LLMError(f"OpenAI 비전 호출 실패: {exc}") from exc
+            if not self._base_url:
+                raise normalize_provider_error(
+                    "openai", exc, operation="비전 호출"
+                ) from exc
+            raise LLMError(f"OpenAI-compatible 비전 호출 실패: {exc}") from exc

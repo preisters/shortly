@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from ..llm.base import LLMClient, LLMError, parse_json_loose
+from ..llm.base import LLMClient, LLMError, LLMQuotaExceeded, parse_json_loose
 from ..utils import log, try_import
 
 _IMG_USAGE_PROMPT = (
@@ -183,6 +183,8 @@ def analyze_image_usage(llm: LLMClient, video_path: Path, cv_result: Dict,
                 rec["relevant_to_caption"] = bool(
                     data.get("relevant_to_caption", True))
                 rec["note"] = str(data.get("note", "") or "")[:200]
+        except LLMQuotaExceeded:
+            raise
         except (LLMError, ValueError) as exc:
             log.info("이미지 내용 분석 실패(t=%.1f): %s", t, exc)
         finally:

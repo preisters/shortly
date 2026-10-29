@@ -10,8 +10,12 @@
 
 from __future__ import annotations
 
+from array import array
 import io
 import json
+import math
+import os
+import sys
 import urllib.error
 import urllib.request
 import wave
@@ -24,13 +28,16 @@ from ..utils import log
 _TTS_URL = "https://api.typecast.ai/v1/text-to-speech"
 _MAX_TEXT = 2000  # API 제한(문자)
 
-# 사용자 지정 기본값(캐릭터 '지훈', 속도 1.3, toneup 100%)
-DEFAULT_VOICE_ID = "tc_61f0859907085fc68561c9a1"
+# 2026-10-20 사용자 지정 기본값(김건, 속도 1.2, toneup 100%)
+DEFAULT_VOICE_ID = "tc_61c2f7741330d213c238cba6"
 DEFAULT_MODEL = "ssfm-v30"          # toneup 은 v30 전용
 DEFAULT_LANGUAGE = "kor"
 DEFAULT_EMOTION = "toneup"
 DEFAULT_INTENSITY = 1.0             # 100%
-DEFAULT_TEMPO = 1.3                 # 1.3배속
+DEFAULT_TEMPO = 1.2                 # 2026-10-20 사용자 기준
+EXPORT_TARGET_ACTIVE_RMS_DBFS = -22.0
+EXPORT_PEAK_CEILING_DBFS = -2.0
+_NORMALIZATION_VERSION = "v1"
 
 
 class TTSError(Exception):
@@ -142,3 +149,103 @@ def synth_to_file(cfg: TypecastConfig, text: str, out_path: Path,
     dur = wav_duration_us(data)
     log.info("TTS 생성: %s (%.2fs) <- %r", out_path.name, dur / 1e6, text[:24])
     return dur
+
+
+def normalize_wav_for_export(
+    source: Path,
+    *,
+    target_dbfs: float | None = None,
+    peak_ceiling_dbfs: float = EXPORT_PEAK_CEILING_DBFS,
+) -> Path:
+    """Match the supplied Shorts reference; explicit RMS targets remain supported."""
+
+    if target_dbfs is None:
+        from .loudness import normalize_reference_wav
+        return normalize_reference_wav(source, true_peak=min(peak_ceiling_dbfs, -2.5))
+
+    source = Path(source)
+    level_tag = (
+        f"{_NORMALIZATION_VERSION}-rms{abs(target_dbfs):g}"
+        f"-peak{abs(peak_ceiling_dbfs):g}"
+    )
+    output = source.parent / "normalized" / f"{source.stem}.{level_tag}.wav"
+    if (
+        output.is_file()
+        and output.stat().st_size > 44
+        and output.stat().st_mtime_ns >= source.stat().st_mtime_ns
+    ):
+        return output
+    with wave.open(str(source), "rb") as reader:
+        params = reader.getparams()
+        if (
+            reader.getsampwidth() != 2
+            or reader.getcomptype() != "NONE"
+        ):
+            raise TTSError("TTS 음량 보정은 16비트 PCM WAV만 지원합니다.")
+        channels = max(1, reader.getnchannels())
+        sample_rate = max(1, reader.getframerate())
+        frames = reader.readframes(reader.getnframes())
+    samples = array("h")
+    samples.frombytes(frames)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    if not samples:
+        raise TTSError("TTS 음량을 보정할 샘플이 없습니다.")
+
+    full_scale = 32767.0
+    threshold = full_scale * (10.0 ** (-45.0 / 20.0))
+    block_samples = max(channels, int(sample_rate * 0.02) * channels)
+    active_square_sum = 0.0
+    active_count = 0
+    for start in range(0, len(samples), block_samples):
+        block = samples[start:start + block_samples]
+        if not block:
+            continue
+        square_sum = sum(float(sample) ** 2 for sample in block)
+        block_rms = math.sqrt(square_sum / len(block))
+        if block_rms >= threshold:
+            active_square_sum += square_sum
+            active_count += len(block)
+    if not active_count:
+        raise TTSError("TTS 음성 구간을 찾지 못해 음량을 보정할 수 없습니다.")
+
+    active_rms = math.sqrt(active_square_sum / active_count)
+    peak = max(abs(int(sample)) for sample in samples)
+    target_rms = full_scale * (10.0 ** (float(target_dbfs) / 20.0))
+    peak_ceiling = full_scale * (
+        10.0 ** (float(peak_ceiling_dbfs) / 20.0)
+    )
+    gain = target_rms / max(active_rms, 1.0)
+    if peak:
+        gain = min(gain, peak_ceiling / peak)
+    # 비정상적으로 작은 파일의 노이즈가 과증폭되지 않도록 제한한다.
+    gain = max(10.0 ** (-12.0 / 20.0), min(gain, 10.0 ** (12.0 / 20.0)))
+
+    normalized = array(
+        "h",
+        (
+            max(-32768, min(32767, int(round(sample * gain))))
+            for sample in samples
+        ),
+    )
+    if sys.byteorder != "little":
+        normalized.byteswap()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    try:
+        with wave.open(str(temporary), "wb") as writer:
+            writer.setparams(params)
+            writer.writeframes(normalized.tobytes())
+        os.replace(temporary, output)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    log.info(
+        "TTS 내보내기 음량 보정: %s -> %s (gain %.2fdB)",
+        source.name,
+        output.name,
+        20.0 * math.log10(max(gain, 1e-9)),
+    )
+    return output

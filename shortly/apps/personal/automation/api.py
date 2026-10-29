@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from ....config import get_settings
 from ....core.domain.assets import AssetType, CandidateStatus, MediaKind
+from ....core.domain.framing import BODY_VIEWPORT
 from ....core.use_cases.build_cut_manifest import (
     AI_PERSON_IMAGE_DISCLOSURE,
     AI_PERSON_VIDEO_DISCLOSURE,
@@ -18,6 +19,7 @@ from ....core.use_cases.build_cut_manifest import (
     build_cut_manifest,
 )
 from ....llm import get_llm
+from ....generate.capcut_export import prepare_guide_tts_timing
 from ..assets import GoogleVideoProvider, OpenAIImageProvider
 from ..local_llm import LOCAL_PROVIDER_NAMES
 from .capcut_assets import commit_export, load_prepared_export, prepare_export
@@ -76,6 +78,7 @@ class PrepareExportRequest(BaseModel):
     manifest_id: str
     guide: dict[str, Any]
     capcut_root: Optional[str] = None
+    approve_tts: bool = False
 
 
 class CommitExportRequest(BaseModel):
@@ -173,7 +176,10 @@ def create_router(
         page = STATIC_DIR / "assets.html"
         if not page.is_file():
             return HTMLResponse("<h1>Shortly personal assets</h1>")
-        return HTMLResponse(page.read_text(encoding="utf-8"))
+        viewport_css = ";".join(
+            f"--body-{key}:{value * 100:g}%" for key, value in BODY_VIEWPORT.items())
+        return HTMLResponse(page.read_text(encoding="utf-8").replace(
+            "/* BODY_VIEWPORT */", f":root{{{viewport_css}}}"))
 
     @router.get("/api/personal/automation/status")
     def status() -> dict:
@@ -190,7 +196,8 @@ def create_router(
                 "monthly_usd": settings.monthly_budget_usd,
             },
             "candidate_count": settings.candidate_count,
-            "max_regenerations": settings.max_regenerations,
+            "max_regenerations": None,
+            "generation_limit_enabled": False,
             "stock_search": {
                 "provider": stock_service.provider,
                 "providers": stock_service.statuses(),
@@ -227,6 +234,13 @@ def create_router(
             if not isinstance(guide, dict) or not guide.get("segments"):
                 raise ValueError("저장된 가이드에 유효한 컷 정보가 없습니다.")
 
+            base = get_settings()
+            guide, tts_timing = prepare_guide_tts_timing(
+                guide,
+                base.typecast_config(),
+                str(base.tts_output_dir),
+            )
+
             candidate = build_cut_manifest(guide)
             manifest = store.find_manifest_by_source_hash(
                 candidate.source_guide_hash
@@ -255,6 +269,7 @@ def create_router(
                 "guide": guide,
                 "reused": reused,
                 "defaults_refreshed": defaults_refreshed,
+                "tts_timing": tts_timing,
             }
         except Exception as exc:
             raise _error(exc) from exc
@@ -504,6 +519,9 @@ def create_router(
     def prepare(body: PrepareExportRequest) -> dict:
         try:
             base = get_settings()
+            tts_cfg = base.typecast_config()
+            if tts_cfg.enabled and not body.approve_tts:
+                raise ValueError("TTS가 필요한 경우 유료 생성이 발생할 수 있습니다. 승인 후 준비를 실행하세요.")
             return prepare_export(
                 store=store,
                 manifest_id=body.manifest_id,
@@ -511,6 +529,8 @@ def create_router(
                 staging_root=settings.assets_dir,
                 capcut_root=body.capcut_root,
                 template_name=base.capcut_template,
+                tts_cfg=tts_cfg,
+                tts_out_dir=str(base.tts_output_dir),
             ).to_dict()
         except Exception as exc:
             raise _error(exc) from exc
@@ -527,6 +547,7 @@ def create_router(
                 load_prepared_export(plan),
                 tts_cfg=base.typecast_config(),
                 tts_out_dir=str(base.tts_output_dir),
+                store=store,
             )
         except Exception as exc:
             raise _error(exc) from exc

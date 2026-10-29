@@ -11,7 +11,7 @@ import json
 import re
 from typing import Dict, List, Optional
 
-from ..llm.base import LLMClient, LLMError
+from ..llm.base import LLMClient, LLMError, LLMQuotaExceeded
 from ..utils import log
 from .research import web_search
 
@@ -86,6 +86,13 @@ def _format_research(research: Optional[Dict]) -> str:
     if research.get("drama_beats"):
         parts.append("[드라마 비트]\n" + "\n".join(
             f"- {x}" for x in research["drama_beats"]))
+    if research.get("user_approved_soft_anecdotes"):
+        parts.append(
+            "[사용자 승인 소프트 일화 — 개인 증언으로만 귀속]\n"
+            + "\n".join(
+                f"- {x}" for x in research["user_approved_soft_anecdotes"]
+            )
+        )
     if research.get("avoid_claims"):
         parts.append("[쓰지 말 것]\n" + "\n".join(
             f"- {x}" for x in research["avoid_claims"]))
@@ -94,7 +101,8 @@ def _format_research(research: Optional[Dict]) -> str:
         snips = []
         for i, r in enumerate(results[:10], 1):
             snips.append(
-                f"{i}. {r.get('title', '')}\n"
+                f"{i}. [{r.get('source_tier', 'general')}] "
+                f"{r.get('title', '')}\n"
                 f"   {r.get('snippet', '')}\n"
                 f"   ({r.get('url', '')})"
             )
@@ -105,6 +113,12 @@ def _format_research(research: Optional[Dict]) -> str:
 def _subject_seed(topic: str, script: Dict) -> str:
     title = (script.get("title") or script.get("hook") or "").strip()
     seed = (topic or "").strip() or title
+    compound = re.search(
+        r"([A-Za-z가-힣0-9·]{2,}\s+(?:치즈|식품|과자|브랜드|회사))",
+        seed,
+    )
+    if compound:
+        return re.sub(r"\s+", " ", compound.group(1)).strip()
     tokens = re.findall(r"[A-Za-z][A-Za-z0-9\-]{1,}|[가-힣]{2,}", seed)
     stop = {"때문에", "일본", "시장", "포기", "독도", "수출", "제품", "관련"}
     brand = next((t for t in tokens if t not in stop), "")
@@ -115,11 +129,20 @@ def _extra_temporal_search(topic: str, script: Dict,
                            max_results: int = 6) -> List[Dict]:
     """사건 발생 시점 확인용 추가 검색."""
     brand = _subject_seed(topic, script)
-    queries = [
-        f"{brand} 일본 수출 포기 언제",
-        f"{brand} 독도 수출 연도",
-        f"{brand} 일본 수출 2010 OR 2011 OR 2012 OR 2013",
-    ]
+    context = " ".join([topic, str(script.get("title") or ""), *_script_lines(script)])
+    years = list(dict.fromkeys(re.findall(r"(?:19|20)\d{2}", context)))
+    if "일본" in context and ("독도" in context or "수출" in context):
+        queries = [
+            f"{brand} 일본 수출 포기 언제",
+            f"{brand} 독도 수출 연도",
+            f"{brand} 일본 수출 {' OR '.join(years[:4])}".strip(),
+        ]
+    else:
+        year_query = " OR ".join(years[:4])
+        queries = [
+            f'"{brand}" 탄생 시작 연혁 {year_query}'.strip(),
+            f'"{brand}" 창립 인물 기술 역사',
+        ]
     merged: List[Dict] = []
     seen = set()
     for q in queries:
@@ -211,6 +234,82 @@ def _heuristic_flags(script: Dict, research: Optional[Dict]) -> List[str]:
     return flags
 
 
+_SEGMENT_REFERENCE = re.compile(
+    r"(?:세그먼트|문장|비트)\s*#?\s*(\d+)",
+    re.I,
+)
+
+
+def apply_factcheck_repairs(
+    original_script: Dict,
+    candidate_script: Dict,
+    *,
+    issues: Optional[List[str]] = None,
+    fixes: Optional[List[str]] = None,
+) -> Dict:
+    """Apply factual repairs without letting the checker rewrite safe beats.
+
+    The user's revision scope protects creative intent, but it must never undo a
+    factual correction elsewhere in the script. When the checker names segment
+    numbers, only those beats are accepted. If it does not name any segment, the
+    candidate is retained because there is no deterministic way to isolate the
+    repair.
+    """
+
+    original_segments = [
+        value
+        for value in original_script.get("segments") or []
+        if isinstance(value, dict)
+    ]
+    candidate_segments = [
+        value
+        for value in candidate_script.get("segments") or []
+        if isinstance(value, dict)
+    ]
+    if not original_segments:
+        return original_script
+    if len(original_segments) != len(candidate_segments):
+        rejected = dict(original_script)
+        rejected["_factcheck_rejected"] = "segment_count_changed"
+        return rejected
+
+    references = {
+        int(match.group(1))
+        for text in [*(issues or []), *(fixes or [])]
+        for match in _SEGMENT_REFERENCE.finditer(str(text))
+    }
+    if not references:
+        return candidate_script
+
+    merged = dict(original_script)
+    repaired = []
+    for position, (original, candidate) in enumerate(
+        zip(original_segments, candidate_segments),
+        1,
+    ):
+        if position in references:
+            repaired.append(dict(candidate))
+        else:
+            repaired.append(dict(original))
+    merged["segments"] = repaired
+    metadata_blob = " ".join([*(issues or []), *(fixes or [])])
+    if re.search(r"(제목|타이틀)", metadata_blob):
+        merged["title"] = candidate_script.get(
+            "title",
+            original_script.get("title"),
+        )
+    if re.search(r"(훅|hook)", metadata_blob, re.I):
+        merged["hook"] = candidate_script.get(
+            "hook",
+            original_script.get("hook"),
+        )
+    merged["_source"] = candidate_script.get(
+        "_source",
+        original_script.get("_source"),
+    )
+    return merged
+
+
 def factcheck_script(
     llm: Optional[LLMClient],
     script: Dict,
@@ -219,6 +318,7 @@ def factcheck_script(
     *,
     force: bool = False,
     revision_instruction: str = "",
+    required_content: str = "",
 ) -> Dict:
     """대본을 조사 메모·추가 시점 검색으로 재검증하고 필요 시 수정한다.
 
@@ -233,6 +333,7 @@ def factcheck_script(
         "fixes": [],
         "extra_results": [],
         "skipped": False,
+        "failed": False,
     }
     if not script or not isinstance(script.get("segments"), list):
         out["skipped"] = True
@@ -273,23 +374,59 @@ def factcheck_script(
         "재조명·품절·돈쭐 보도 시점을 수출 포기 시점으로 쓰지 마라.\n"
         "2) 주체: 한 기사에 회사 A·B가 같이 나오면 A의 시점/사건을 B에 붙이지 마라. "
         "예: '올해 초 수출 불발'이 올바름 이야기면 성경식품에 쓰지 마라.\n"
+        "조건과 원인도 구분한다. 냉장 보관이 필수라 유통이 불편했다는 사실을 포장 자체가 냉장 "
+        "보관을 어렵게 만든 결함으로 바꾸지 말고, 새 방식이 실제로 보완한 제약만 표현한다.\n"
         "3) 연도가 불확실하면 연도·'올해 초'를 빼고 "
         "'독도 표기 때문에 일본 수출을 포기했다'처럼 확인된 골격만 남겨라.\n"
+        "연도가 정확하더라도 출시·계약·리뉴얼·기록 변화·통계 기준처럼 시점 자체가 핵심인 "
+        "정보가 아니라, 기사·조사·비교가 이뤄진 시점일 뿐이면 대사에 넣지 마라. 연도를 빼도 "
+        "사실의 의미와 적용 범위가 같다면 삭제하고, 출처 시점은 issues·fixes에만 기록한다.\n"
         "4) 말투·훅 임팩트·세그먼트 수·intent·기승전결은 그대로 유지한다. "
         "오류가 있는 최소 구절만 교체하고, 한 오류 때문에 세그먼트 전체나 다른 세그먼트를 "
-        "재작성하지 마라. 재미를 위해 새 사건을 만들지 마라.\n"
+        "재작성하지 마라. 재미를 위해 새 사건을 만들지 마라. 팩트 수정 과정에서도 앞뒤가 "
+        "같은 상승 방향이면 '근데/하지만'을 새로 넣지 말고 '그리고' 또는 무접속으로 잇는다.\n"
+        "최소 교체한 표현도 해당 세그먼트 전체를 소리 내 읽었을 때 자연스러워야 한다. 원문에서 "
+        "숫자나 단어만 삭제해 '원재료만으로 과자를 찍어냈다', '만든, 믿고 먹는' 같은 어색한 "
+        "결합이나 분리된 관형어를 남기지 말고, 같은 사실 범위 안에서 문장 전체의 조사·서술어를 "
+        "자연스럽게 맞춘다. 이는 구조 재작성이 아니라 해당 비트의 문법 복구다.\n"
         "5) 수치: 모든 숫자·금액·비율·증가율은 조사 자료에서 동일한 값이 확인되는지 "
         "검사하고, 통계의 주체·지역·품목 범위, 절대 기준연도/기간, 비교 기준을 유지한다. "
         "전국과 특정 지역, 전체 김과 조미김, 업계 전체와 특정 회사 수치를 혼동하지 마라. "
         "업계 통계를 특정 회사의 실적·인과처럼 붙이지 마라. 기사 스니펫만 근거라면 "
-        "'몇 년 보도 기준'처럼 한계를 밝히고, 짧게 정확히 쓸 수 없으면 수치를 삭제한다.\n"
+        "불필요한 수치·연도를 삭제하고 확인된 방향성만 짧게 남긴다. "
+        "'(2024년 보도 기준)', '기사에 따르면', '보도 기준으로' 같은 출처 메모나 "
+        "괄호형 면책 문구를 음성 대사에 새로 넣지 마라. 꼭 필요한 기준연도는 사실 문장 안에 "
+        "자연스럽게 붙이고, 근거의 한계는 issues·fixes에 기록한다.\n"
         "6) 인수·계약·협상은 기사 본문의 최종 상태까지 확인한다. 제목이 검토설이어도 "
         "본문에 당사자의 부인이나 결렬이 있으면 그 상태를 반영한다.\n"
         "7) 대본 수정 요청이 함께 제공되면 그 요청의 방향과 수정 범위를 보존한다. "
-        "예를 들어 '마무리만'이면 다른 세그먼트·제목을 바꾸지 않는다. 요청한 세부 수치가 "
+        "예를 들어 '마무리만'이면 사실 오류가 없는 다른 세그먼트·제목을 바꾸지 않는다. "
+        "단, 수정 범위 밖에서 치명적인 사실 오류를 발견하면 그 오류 구절만 고치고 "
+        "issues와 fixes에 반드시 '세그먼트 N'을 명시한다. 요청한 세부 수치가 "
         "불확실하면 검증된 같은 방향의 사실로 완화하되, 사용자가 제거하라고 한 문장이나 "
         "전혀 다른 결말을 되살리지 않는다.\n"
-        "8) 문제 없으면 changed=false, script는 원문 그대로.\n"
+        "8) 팩트 수정 뒤에도 결말의 반전·보상은 구어체 한 방으로 남겨라. 검증되지 않은 성공을 "
+        "만들지는 말되, 서로 다른 검증 사실의 지역·인과를 합치지 않는 범위에서 대치와 결과의 "
+        "대비를 살린다. 검증된 해외 성장·판매 확대를 바탕으로 한 '주문이 폭발했다', "
+        "'없어서 못 팔 지경' 같은 감정적 과장은 건조한 수치 보고로 약화하지 않는다. 단, 이를 "
+        "특정 국가의 실제 품절·재고 부족 사실로 바꾸지는 마라. 문제 없으면 changed=false, "
+        "script는 원문 그대로.\n"
+        "9) 인과: 대본의 '때문에·덕분에·이유·원인·그 결과'가 조사 근거에서 실제로 연결되는지 "
+        "검사한다. 두 사실이 모두 참이거나 시간 순서로 이어진다는 것만으로 인과가 되지는 않는다. "
+        "특히 과거의 판매 장벽이 나중의 문화적 수용 이유가 됐다는 식의 대칭 문장은 근거가 없으면 "
+        "인과 표현을 제거하고 '장벽을 뚫고 문화 속까지 들어갔다'는 대비로만 최소 수정한다.\n"
+        "10) 결말 적합성: 마케팅·홍보라는 단어만으로 결말을 삭제하지 마라. 검증된 사실 안에서 "
+        "사용자 지정 필수 결말 > 중심 사건의 직접적인 결과 > 일반 편집 취향 순으로 우선한다. "
+        "사용자 지정 행사나 복귀 파티처럼 중심 사건의 결과인 장면은 유지하고, 관련 없는 후속 운영 "
+        "정보만 제외한다. 행사 주최자·참여 규모와 사실의 범위를 정확하게 유지한다.\n"
+        "11) 사용자 승인 소프트 일화: 조사 메모의 [사용자 승인 소프트 일화]에 있고 이번 입력이나 "
+        "수정 요청에서도 사용이 승인된 개인 온라인 회상은 원문 주소 미확보만으로 삭제하지 마라. "
+        "반드시 '한 네티즌은 ...고 함'처럼 개인에게 귀속하고, 일반 관습·통계·하드 팩트로 확대하거나 "
+        "미확인 가족관계·시점·국적을 추가하지 마라. 출처 미확보 상태는 issues에 기록할 수 있다.\n"
+        "12) 사용자 필수 포함 내용: 별도 블록의 항목은 사용자가 직접 지정한 필수 재료다. 검색 근거를 "
+        "확보하지 못했다는 이유만으로 대본에서 삭제하지 말고 입력 범위 그대로 유지하면서 issues에 "
+        "검증 필요를 기록한다. 다만 조사 자료와 명백히 충돌하면 검증된 표현으로 최소 교정하고 fixes에 "
+        "충돌 내용을 남긴다. 필수 항목에 없던 수치·인과·세부는 추가하지 마라.\n"
         "JSON만 출력."
     )
     schema = (
@@ -300,24 +437,48 @@ def factcheck_script(
         '"segments": [{"index": number, "text": string, "intent": string}]}}'
     )
     user = (
-        f"[주제/입력]\n{(topic or '')[:1500]}\n\n"
+        f"[주제/입력]\n{topic or ''}\n\n"
         f"[이번 대본 수정 요청]\n"
-        f"{(revision_instruction or '(신규 생성 — 수정 요청 없음)')[:1500]}\n\n"
-        f"[생성 대본 JSON]\n{json.dumps(script, ensure_ascii=False)[:3500]}\n\n"
+        f"{revision_instruction or '(신규 생성 — 수정 요청 없음)'}\n\n"
+        f"[사용자 필수 포함 내용 — 분량 허용/선택 항목은 생략 가능]\n{required_content or '(없음)'}\n\n"
+        f"[생성 대본 JSON]\n{json.dumps(script, ensure_ascii=False)}\n\n"
         f"[조사 메모·스니펫]\n{_format_research(research)[:4500]}\n\n"
         f"[시점·수치 추가 검색]\n{extra_txt[:2500] or '(없음)'}\n\n"
         f"[규칙 기반 위험 신호]\n"
         + ("\n".join(f"- {x}" for x in flags) if flags else "(없음)")
         + f"\n\n스키마: {schema}"
     )
-    try:
-        data = llm.complete_json(system, user, temperature=0.05, max_tokens=3500)
-    except LLMError as exc:
-        log.info("팩트체크 LLM 실패: %s", exc)
-        out["issues"] = flags + [f"팩트체크 LLM 실패: {exc}"]
+    data = None
+    last_error: Optional[LLMError] = None
+    for attempt in range(2):
+        try:
+            retry_system = system
+            retry_user = user
+            if attempt:
+                retry_system += (
+                    "\n이전 응답을 JSON으로 파싱하지 못했다. 설명·마크다운·코드펜스를 "
+                    "모두 빼고 스키마와 일치하는 완전한 JSON 하나만 짧게 출력하라."
+                )
+                retry_user = user
+            data = llm.complete_json(
+                retry_system,
+                retry_user,
+                temperature=0.0 if attempt else 0.05,
+                max_tokens=3000 if attempt else 3500,
+            )
+            break
+        except LLMQuotaExceeded:
+            raise
+        except LLMError as exc:
+            last_error = exc
+            log.info("팩트체크 LLM 실패 attempt=%d: %s", attempt + 1, exc)
+    if data is None:
+        out["failed"] = True
+        out["issues"] = flags + [f"팩트체크 LLM 실패: {last_error}"]
         return out
 
     if not isinstance(data, dict):
+        out["failed"] = True
         out["issues"] = flags + ["팩트체크 응답 형식 오류"]
         return out
 

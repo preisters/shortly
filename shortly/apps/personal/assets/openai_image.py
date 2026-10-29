@@ -76,9 +76,58 @@ class OpenAIImageProvider:
             data = base64.b64decode(encoded, validate=True)
         except AssetGenerationError:
             raise
-        except (urllib.error.URLError, ValueError, KeyError, IndexError) as exc:
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            provider_code = ""
+            try:
+                error_payload = json.loads(exc.read().decode("utf-8", errors="replace"))
+                error_value = error_payload.get("error") or {}
+                detail = str(error_value.get("message") or "").strip()
+                provider_code = str(
+                    error_value.get("code") or error_value.get("type") or ""
+                ).strip()
+            except (ValueError, AttributeError, OSError):
+                detail = str(getattr(exc, "reason", "") or "").strip()
+            status = int(exc.code)
+            lowered = f"{provider_code} {detail}".lower()
+            if status in (401, 403):
+                code, retryable, action = "authentication_failed", False, "check_settings"
+            elif status == 429 and any(
+                token in lowered
+                for token in ("quota", "billing", "credit", "insufficient")
+            ):
+                code, retryable, action = "quota_exceeded", False, "check_billing"
+            elif status == 429:
+                code, retryable, action = "rate_limited", True, "retry_later"
+            elif status >= 500:
+                code, retryable, action = "provider_server_error", True, "retry_later"
+            else:
+                code, retryable, action = "invalid_request", False, "revise_prompt"
+            technical = f"HTTP {status}"
+            if provider_code:
+                technical += f" / {provider_code}"
+            if detail:
+                technical += f": {detail}"
             raise AssetGenerationError(
-                f"OpenAI image generation failed: {type(exc).__name__}"
+                f"OpenAI image generation failed: {technical}",
+                code=code,
+                retryable=retryable,
+                recommended_action=action,
+                http_status=status,
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise AssetGenerationError(
+                f"OpenAI image network request failed: {exc.reason}",
+                code="network_error",
+                retryable=True,
+                recommended_action="retry_later",
+            ) from exc
+        except (ValueError, KeyError, IndexError) as exc:
+            raise AssetGenerationError(
+                f"OpenAI image response could not be decoded: {type(exc).__name__}",
+                code="invalid_provider_response",
+                retryable=True,
+                recommended_action="retry_later",
             ) from exc
         mime = {
             "png": "image/png",

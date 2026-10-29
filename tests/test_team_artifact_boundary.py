@@ -71,10 +71,16 @@ assert type(client) is LLMClient
 assert importlib.util.find_spec("shortly.apps.personal") is None
 assert str(shortly.__file__).startswith({str(output)!r})
 if importlib.util.find_spec("fastapi") is not None:
+    from fastapi.testclient import TestClient
     from shortly.apps.team.api import create_app
     app = create_app()
     paths = {{getattr(route, "path", None) for route in app.routes}}
     assert "/api/local-models" not in paths
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        response = client.get("/")
+    assert response.status_code == 200, response.text
+    assert 'value="local"' not in response.text
+    assert "Ollama" not in response.text
 """
             completed = subprocess.run(
                 [sys.executable, "-I", "-c", smoke],

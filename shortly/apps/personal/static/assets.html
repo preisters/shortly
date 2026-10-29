@@ -18,6 +18,9 @@
     .reason-text{display:-webkit-box;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:3}
     .fact{display:inline-block;margin-top:4px;padding:2px 6px;border-radius:4px;background:#5b3030;color:#ffd1d1;font-size:11px}
     .state{font-weight:700;white-space:nowrap}.state-running{color:#ffd66b}.state-completed{color:#79e2a7}.state-failed{color:#ff8e8e}
+    .failure-box{min-width:230px;max-width:310px;margin-top:6px;padding:8px;border:1px solid #713f46;border-radius:7px;background:#2b1b20;font-size:12px;line-height:1.45;font-weight:400;color:#f3c9cf;white-space:normal}
+    .failure-box b{display:block;margin-bottom:3px;color:#ffb7c0}.failure-action{margin-top:4px;color:#f2dfb0}.failure-badge{display:inline-block;margin-top:6px;padding:2px 6px;border-radius:4px;background:#453a24;color:#ffe39a;font-size:11px}
+    .failure-box details{margin-top:6px;color:#b9adba}.failure-box summary{cursor:pointer}.failure-detail{margin-top:4px;overflow-wrap:anywhere}
     .spinner{display:inline-block;width:12px;height:12px;margin-right:6px;border:2px solid #73798f;border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}
     @keyframes spin{to{transform:rotate(360deg)}}
     pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0d0e12;padding:14px;border-radius:8px}
@@ -30,7 +33,12 @@
     .stock-card img{width:100%;aspect-ratio:4/3;object-fit:cover;background:#090a0e;border-radius:7px}.stock-card strong{overflow-wrap:anywhere}.stock-card small{color:#aeb2c1;line-height:1.4}
     .stock-card button{margin-top:auto}.badge-row{display:flex;gap:6px;flex-wrap:wrap}.license-badge,.provider-badge{display:inline-block;width:max-content;padding:2px 6px;border-radius:4px;font-size:11px}.license-badge{background:#264b3c;color:#baf2d3}.provider-badge{background:#303a65;color:#cad5ff}
     .stock-pagination{display:flex;justify-content:center;align-items:center;gap:10px;margin-top:16px}.stock-empty{grid-column:1/-1;padding:36px;text-align:center;color:#a7abba}
-    .asset-preview{width:142px;min-width:142px}.asset-preview img,.asset-preview video{display:block;width:136px;height:104px;object-fit:contain;background:#090a0e;border:1px solid #3a3e50;border-radius:8px}
+    /* BODY_VIEWPORT */
+    .asset-preview{width:142px;min-width:142px}
+    .asset-frame{position:relative;width:136px;aspect-ratio:9/16;background:#090a0e;border:1px solid #3a3e50;border-radius:8px}
+    .asset-frame::before{content:'제목 · 자막 영역';position:absolute;top:12%;width:100%;text-align:center;font-size:10px;color:#9ca1b2}
+    .asset-body{position:absolute;left:var(--body-left);top:var(--body-top);width:var(--body-width);height:var(--body-height)}
+    .asset-body img,.asset-body video,.asset-body a{display:block;width:100%;height:100%;object-fit:contain}
     .asset-preview a{display:block}.preview-empty{display:flex;width:136px;height:104px;align-items:center;justify-content:center;box-sizing:border-box;border:1px dashed #3a3e50;border-radius:8px;color:#777c8d;font-size:12px;text-align:center}
   </style>
 </head>
@@ -59,6 +67,7 @@
   </section>
   <section>
     <h2>3. 검수와 사용량</h2>
+    <p class="muted">Qwen은 컷 명세 텍스트를 검수합니다. 실제 이미지·영상의 구도와 잘림은 위 배치 예상도와 CapCut에서 확인하세요.</p>
     <div class="row">
       <button id="review" class="secondary">기술 검수</button>
       <button id="qwen" class="secondary">로컬 Qwen 검수</button>
@@ -68,7 +77,7 @@
   </section>
   <section>
     <h2>4. CapCut 내보내기</h2>
-    <p class="muted">준비 단계는 파일과 템플릿만 검사합니다. 커밋을 별도로 눌러야 CapCut 프로젝트가 생성됩니다.</p>
+    <p class="muted">준비 단계에서 파일·템플릿과 본문 타이밍을 확정합니다. TTS 사용 시 캐시가 없는 음성은 승인 후 유료 생성될 수 있습니다. 커밋을 눌러야 CapCut 프로젝트가 생성됩니다.</p>
     <div class="row">
       <input id="capcut-root" placeholder="CapCut 프로젝트 경로(자동 탐색 시 비움)" style="flex:1">
       <button id="prepare-export" class="secondary">내보내기 준비</button>
@@ -110,6 +119,7 @@
   </div>
   <script>
     let manifest=null, preparedExport=null, automationStatus=null, batchRunning=false, reviewRunning=false;
+    let preparedInputs=null, preparingExport=false, committingExport=false;
     let stockCutId=null, stockPage=1, stockPageCount=1, stockSearching=false;
     const cutStates=new Map();
     let jobRefreshTimer=null;
@@ -140,8 +150,25 @@
       }catch(_error){return ""}
     }
     function show(value){result.textContent=JSON.stringify(value,null,2)}
+    const quotaAlerts=new Set();
+    function alertQuotaFailure(cutId,jobId,failure){
+      if(failure?.code!=="quota_exceeded") return;
+      const key=jobId||`${cutId}:${failure.technical_detail||failure.reason||"quota"}`;
+      if(quotaAlerts.has(key)) return;
+      quotaAlerts.add(key);
+      alert(
+        "상용 AI 토큰·크레딧 부족\n\n"+
+        (failure.reason||"상용 AI의 사용 가능 잔액 또는 할당량이 부족합니다.")+"\n"+
+        (failure.recommendation||"공급자 대시보드에서 잔액과 사용 한도를 확인하세요.")
+      );
+    }
     function selectedCandidate(cut){
       return (cut.candidates||[]).find(candidate=>candidate.id===cut.selected_candidate_id)||null;
+    }
+    function generationButtonLabel(cut){
+      const state=cutStates.get(cut.id);
+      if(state?.status==="failed") return "다시 생성";
+      return cut.selected_candidate_id?"재생성":"비용 확인·생성";
     }
     function compactReason(cut){
       const notes=(cut.notes||[])
@@ -154,9 +181,85 @@
       if(!candidate) return '<div class="preview-empty">선택된 에셋 없음</div>';
       const source=`/api/personal/manifests/${encodeURIComponent(manifest.manifest_id)}/cuts/${encodeURIComponent(cut.id)}/preview?v=${encodeURIComponent(candidate.id)}`;
       if(candidate.media_kind==="video"){
-        return `<video src="${escapeHtml(source)}" controls muted preload="metadata" aria-label="${escapeHtml(cut.id)} 영상 미리보기"></video>`;
+        return `<div class="asset-frame" title="원본 전체 보기 · 본문 배치 예상도 (자막 스타일 제외)"><div class="asset-body"><video src="${escapeHtml(source)}" controls muted preload="metadata" aria-label="${escapeHtml(cut.id)} 영상 미리보기"></video></div></div>`;
       }
-      return `<a href="${escapeHtml(source)}" target="_blank" title="원본 크기로 열기"><img src="${escapeHtml(source)}" alt="${escapeHtml(cut.id)} 선택 이미지 미리보기" loading="lazy"></a>`;
+      return `<div class="asset-frame" title="원본 전체 보기 · 본문 배치 예상도 (자막 스타일 제외)"><div class="asset-body"><a href="${escapeHtml(source)}" target="_blank" title="원본 크기로 열기"><img src="${escapeHtml(source)}" alt="${escapeHtml(cut.id)} 선택 이미지 미리보기" loading="lazy"></a></div></div>`;
+    }
+    function legacyFailure(job){
+      if(job.result?.failure) return job.result.failure;
+      const detail=String(job.error||"");
+      const lowered=detail.toLowerCase();
+      if(
+        lowered.includes("quota")||lowered.includes("billing")||
+        lowered.includes("credit")||lowered.includes("insufficient")||
+        lowered.includes("resource_exhausted")
+      ){
+        return {
+          code:"quota_exceeded",
+          reason:"상용 AI 토큰·크레딧 또는 사용 할당량이 부족합니다.",
+          recommendation:"공급자 대시보드에서 잔액과 사용 한도를 확인한 뒤 다시 생성하세요.",
+          retryable:false,
+          manual_recommended:false,
+          technical_detail:detail
+        };
+      }
+      if(lowered.includes("ratelimit")||lowered.includes("rate limit")){
+        return {
+          code:"rate_limited",
+          reason:"짧은 시간에 요청이 몰려 공급자가 생성을 제한했습니다.",
+          recommendation:"잠시 기다린 뒤 다시 생성하는 것을 권장합니다.",
+          retryable:true,
+          manual_recommended:false,
+          technical_detail:detail
+        };
+      }
+      if(lowered.includes("internalserver")||lowered.includes("internal server")){
+        return {
+          code:"provider_server_error",
+          reason:"생성 공급자 서버에서 일시적인 오류가 발생했습니다.",
+          recommendation:"잠시 기다린 뒤 다시 생성하는 것을 권장합니다.",
+          retryable:true,
+          manual_recommended:false,
+          technical_detail:detail
+        };
+      }
+      if(lowered.includes("badrequest")||lowered.includes("bad request")){
+        return {
+          code:"invalid_request",
+          reason:"공급자가 기존 생성 요청을 유효하지 않은 요청으로 거부했습니다.",
+          recommendation:"모델·생성 옵션·프롬프트를 확인하고, 반복되면 수동 처리를 검토하세요.",
+          retryable:false,
+          manual_recommended:true,
+          technical_detail:detail
+        };
+      }
+      return {
+        code:"legacy_generation_failure",
+        reason:"상세 실패 사유 저장 기능이 추가되기 전에 발생한 생성 오류입니다.",
+        recommendation:"공급자 설정과 잔액을 확인한 뒤 한 번 다시 생성하고, 같은 오류가 반복되면 새 상세 안내를 확인하세요.",
+        retryable:true,
+        manual_recommended:false,
+        technical_detail:detail
+      };
+    }
+    function actionMarkup(cut){
+      if(cut.asset_type.startsWith("generated_")){
+        return `<button data-generate="${escapeHtml(cut.id)}" ${batchRunning?"disabled":""}>${generationButtonLabel(cut)}</button>`;
+      }
+      const state=cutStates.get(cut.id);
+      if(
+        cut.asset_type==="manual_required"&&
+        ["failed","manual_required"].includes(state?.status)&&
+        ["image","video"].includes(state?.kind)
+      ){
+        const label=state.kind==="video"?"AI 영상 다시 시도":"AI 이미지 다시 시도";
+        return `<button data-generate="${escapeHtml(cut.id)}" data-restore-kind="${escapeHtml(state.kind)}" ${batchRunning?"disabled":""}>${label}</button>`;
+      }
+      if(cut.asset_type==="stock_image"){
+        return `<button class="secondary" data-stock-search="${escapeHtml(cut.id)}">${cut.selected_candidate_id?"스톡 이미지 변경":"무료 스톡 검색"}</button>`;
+      }
+      if(cut.asset_type==="real_image") return "원본 직접 확보";
+      return "수동 처리";
     }
     function statusLabel(cut){
       const state=cutStates.get(cut.id);
@@ -167,15 +270,33 @@
         return `<span class="state state-completed">${cut.asset_type==="stock_image"?"스톡 선택 완료":"생성 완료"}</span>`;
       }
       if(state?.status==="failed"||state?.status==="manual_required"){
-        return `<span class="state state-failed">생성 실패</span>`;
+        const failure=state.failure||{};
+        const reason=failure.reason||state.error||"생성 작업이 완료되지 않았습니다.";
+        const recommendation=failure.recommendation||
+          "상세 오류를 확인한 뒤 다시 생성하고, 같은 오류가 반복되면 수동 처리를 검토하세요.";
+        const badge=failure.manual_recommended
+          ? "수동 처리 검토"
+          : failure.retryable
+            ? "재시도 권장"
+            : "설정·프롬프트 확인";
+        const technical=failure.technical_detail||"";
+        return `<span class="state state-failed">생성 실패</span>`+
+          `<div class="failure-box"><b>${escapeHtml(reason)}</b>`+
+          `<div class="failure-action">${escapeHtml(recommendation)}</div>`+
+          `<span class="failure-badge">${escapeHtml(badge)}</span>`+
+          (technical
+            ? `<details><summary>상세 오류</summary><div class="failure-detail">${escapeHtml(technical)}</div></details>`
+            : "")+
+          `</div>`;
       }
       if(state?.status==="approved"||state?.status==="awaiting_approval"){
         return '<span class="state state-running">승인 대기</span>';
       }
       return '<span class="muted">대기</span>';
     }
-    function setCutState(cutId,status,jobId=null,error=""){
-      cutStates.set(cutId,{status,jobId,error});
+    function setCutState(cutId,status,jobId=null,error="",failure=null,jobMeta={}){
+      cutStates.set(cutId,{status,jobId,error,failure,...jobMeta});
+      alertQuotaFailure(cutId,jobId,failure);
       const cell=document.querySelector(`[data-cut-status="${CSS.escape(cutId)}"]`);
       const cut=manifest?.cuts.find(item=>item.id===cutId);
       if(cell&&cut) cell.innerHTML=statusLabel(cut);
@@ -192,7 +313,15 @@
         const jobs=await api(`/api/personal/jobs?manifest_id=${encodeURIComponent(manifest.manifest_id)}`);
         const latest=new Map();
         jobs.forEach(job=>{if(!latest.has(job.cut_id)) latest.set(job.cut_id,job)});
-        latest.forEach(job=>setCutState(job.cut_id,job.status,job.id,job.error||""));
+        latest.forEach(job=>setCutState(
+          job.cut_id,
+          job.status,
+          job.id,
+          job.error||"",
+          ["failed","manual_required"].includes(job.status)?legacyFailure(job):(job.result?.failure||null),
+          {kind:job.kind,provider:job.provider,model:job.model}
+        ));
+        if(latest.size) render();
         return jobs.some(job=>
           ["approved","awaiting_approval","running","submitted"].includes(job.status)
         );
@@ -248,11 +377,11 @@
         method:"POST",
         body:JSON.stringify({approval_token:approval.approval_token})
       });
-      setCutState(cut.id,current.status,job.id,current.error||"");
+      setCutState(cut.id,current.status,job.id,current.error||"",current.result?.failure||null);
       while(current.status==="submitted"){
         await sleep(5000);
         current=await api(`/api/personal/jobs/${job.id}/poll`,{method:"POST"});
-        setCutState(cut.id,current.status,job.id,current.error||"");
+        setCutState(cut.id,current.status,job.id,current.error||"",current.result?.failure||null);
       }
       return current;
     }
@@ -277,7 +406,7 @@
       target.innerHTML="<table><thead><tr><th>컷</th><th>프롬프트</th><th>유형</th><th>판정 이유</th><th>미리보기</th><th>상태</th><th>실행</th></tr></thead><tbody>"+
         manifest.cuts.map(c=>`<tr><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.prompt)}</td><td><select data-cut="${escapeHtml(c.id)}" ${batchRunning?"disabled":""}>
         ${assetTypes.map(v=>`<option value="${v}" ${v===c.asset_type?"selected":""}>${assetLabels[v]}</option>`).join("")}
-        </select></td><td class="reason" title="${escapeHtml(compactReason(c))}"><span class="reason-text">${escapeHtml(compactReason(c))}</span>${c.fact_sensitive?'<span class="fact">사실성 보호</span>':""}${c.disclosure_text?'<span class="fact">가상 인물 고지</span>':""}</td><td class="asset-preview">${previewMarkup(c)}</td><td data-cut-status="${escapeHtml(c.id)}">${statusLabel(c)}</td><td>${c.asset_type.startsWith("generated_")?`<button data-generate="${escapeHtml(c.id)}" ${batchRunning?"disabled":""}>비용 확인·생성</button>`:c.asset_type==="stock_image"?`<button class="secondary" data-stock-search="${escapeHtml(c.id)}">${c.selected_candidate_id?"스톡 이미지 변경":"무료 스톡 검색"}</button>`:c.asset_type==="real_image"?"원본 직접 확보":"수동 처리"}</td></tr>`).join("")+"</tbody></table>";
+        </select></td><td class="reason" title="${escapeHtml(compactReason(c))}"><span class="reason-text">${escapeHtml(compactReason(c))}</span>${c.fact_sensitive?'<span class="fact">사실성 보호</span>':""}${c.disclosure_text?'<span class="fact">가상 인물 고지</span>':""}</td><td class="asset-preview">${previewMarkup(c)}</td><td data-cut-status="${escapeHtml(c.id)}">${statusLabel(c)}</td><td data-cut-action="${escapeHtml(c.id)}">${actionMarkup(c)}</td></tr>`).join("")+"</tbody></table>";
       target.querySelectorAll("select").forEach(el=>el.onchange=async()=>{
         const cut=manifest.cuts.find(item=>item.id===el.dataset.cut);
         if(!cut) return;
@@ -312,9 +441,24 @@
       });
       target.querySelectorAll("[data-generate]").forEach(el=>el.onclick=async()=>{
         try{
-          const cut=manifest.cuts.find(c=>c.id===el.dataset.generate);
+          let cut=manifest.cuts.find(c=>c.id===el.dataset.generate);
+          const restoreKind=el.dataset.restoreKind||"";
+          if(restoreKind){
+            const mediaLabel=restoreKind==="video"?"AI 영상":"AI 이미지";
+            if(!confirm(
+              `${cut.id}\\n이전 생성 실패로 수동 처리 유형이 된 컷입니다.\\n`+
+              `${mediaLabel} 유형으로 되돌리고 다시 생성할까요?`
+            )) return;
+            await api(`/api/personal/manifests/${manifest.manifest_id}/cuts/${cut.id}`,{
+              method:"PATCH",
+              body:JSON.stringify({asset_type:restoreKind==="video"?"generated_video":"generated_image"})
+            });
+            manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);
+            cut=manifest.cuts.find(c=>c.id===el.dataset.generate);
+          }
           const config=await generationConfig(cut);
-          if(!confirm(`${cut.id}\\n${config.provider} / ${config.model}\\n예상 비용 USD $${config.estimate.toFixed(2)}\\n실제 유료 생성을 승인할까요?`)) return;
+          const action=cut.selected_candidate_id?"재생성":"생성";
+          if(!confirm(`${cut.id}\\n${config.provider} / ${config.model}\\n예상 비용 USD $${config.estimate.toFixed(2)}\\n실제 유료 ${action}을 승인할까요?`)) return;
           setCutState(cut.id,"running");
           show(await executeGeneration(cut,config));
           preparedExport=null;manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);render();
@@ -431,11 +575,17 @@
       stockPage=1;
       stockPageCount=1;
       document.querySelector("#stock-cut").textContent=`${cut.id} · ${cut.prompt}`;
-      document.querySelector("#stock-query").value=cut.stock_query||cut.prompt||"";
+      document.querySelector("#stock-query").value=cut.stock_query||"";
       document.querySelector("#stock-modal").hidden=false;
       try{
         await configureStockProviders();
-        searchStock(1);
+        if(cut.stock_query){
+          searchStock(1);
+        }else{
+          document.querySelector("#stock-results").innerHTML=
+            '<div class="stock-empty">이전에 만든 가이드라 추천 검색어가 없습니다. 피사체와 장소를 나타내는 짧은 영어 검색어를 입력하세요.</div>';
+          document.querySelector("#stock-query").focus();
+        }
       }catch(error){
         document.querySelector("#stock-results").innerHTML=`<div class="stock-empty error">${escapeHtml(error.message)}</div>`;
       }
@@ -482,6 +632,14 @@
             setCutState(cut.id,"running");
             const job=await executeGeneration(cut,config);
             if(job.status==="completed") summary.completed+=1;
+            else if(job.status==="failed"){
+              summary.failed+=1;
+              summary.failures.push({
+                cut_id:cut.id,
+                error:job.error||"생성 실패",
+                failure:job.result?.failure||null
+              });
+            }
             else summary.submitted+=1;
             manifest=await api(`/api/personal/manifests/${manifest.manifest_id}`);
             render();
@@ -507,32 +665,47 @@
       }
     };
     document.querySelector("#manifest-create").onclick=async()=>{try{
+      preparedExport=null;preparedInputs=null;
       manifest=await api("/api/personal/manifests",{method:"POST",body:JSON.stringify({guide:JSON.parse(document.querySelector("#guide").value),overrides:{}})});render();startJobRefresh();show(manifest)
     }catch(e){result.textContent=e.message}};
     document.querySelector("#review").onclick=async()=>{try{show(await api(`/api/personal/manifests/${manifest.manifest_id}/review`,{method:"POST"}))}catch(e){result.textContent=e.message}};
     document.querySelector("#qwen").onclick=async()=>{const button=document.querySelector("#qwen");try{
       if(!manifest) throw new Error("컷 명세를 먼저 생성하세요.");
       reviewRunning=true;button.disabled=true;button.innerHTML='<span class="spinner"></span>로컬 Qwen 검수 중';
-      result.textContent="로컬 Qwen이 컷 구성과 에셋을 검수하고 있습니다. 잠시 기다려 주세요.";
+      result.textContent="로컬 Qwen이 컷 명세 텍스트를 검수하고 있습니다. 실제 영상 화면 검수는 아닙니다.";
       show(await api(`/api/personal/manifests/${manifest.manifest_id}/review?local_qwen=true`,{method:"POST"}))
     }catch(e){result.textContent=e.message}finally{reviewRunning=false;button.disabled=false;button.textContent="로컬 Qwen 검수"}};
     document.querySelector("#usage").onclick=async()=>{try{show(await api(`/api/personal/usage?manifest_id=${manifest.manifest_id}`))}catch(e){result.textContent=e.message}};
-    document.querySelector("#prepare-export").onclick=async()=>{try{
+    document.querySelector("#prepare-export").onclick=async()=>{if(preparingExport||committingExport) return;try{
+      preparedExport=null;
+      preparedInputs=null;
       const missingStock=(manifest?.cuts||[])
         .filter(cut=>cut.asset_type==="stock_image"&&!cut.selected_candidate_id)
         .map(cut=>cut.id);
       if(missingStock.length){
-        throw new Error(
-          `스톡 이미지가 선택되지 않은 컷이 있습니다: ${missingStock.join(", ")}`
-        );
+        if(!confirm(
+          `스톡 이미지를 선택하지 않은 컷이 있습니다: ${missingStock.join(", ")}\n\n`+
+          `이 컷에는 이미지가 자동 삽입되지 않습니다. 직접 찾아 넣거나 별도로 생성하려면 `+
+          `선택하지 않은 상태로 내보내기를 계속할 수 있습니다.\n\n계속할까요?`
+        )) return;
       }
-      preparedExport=await api("/api/personal/exports/prepare",{method:"POST",body:JSON.stringify({manifest_id:manifest.manifest_id,guide:JSON.parse(document.querySelector("#guide").value),capcut_root:document.querySelector("#capcut-root").value||null})});show(preparedExport)
-    }catch(e){result.textContent=e.message}};
-    document.querySelector("#commit-export").onclick=async()=>{try{
+      if(!confirm("본문 타이밍을 확정합니다. TTS 사용 시 기존 음성은 재사용하고 없는 음성은 유료 생성될 수 있습니다. 진행할까요?")) return;
+      preparingExport=true;
+      document.querySelector("#prepare-export").disabled=true;
+      const inputs={manifest_id:manifest.manifest_id,guide:JSON.parse(document.querySelector("#guide").value),capcut_root:document.querySelector("#capcut-root").value||null};
+      result.textContent="음성·타이밍 확인 및 내보내기 준비 중…";
+      const plan=await api("/api/personal/exports/prepare",{method:"POST",body:JSON.stringify({...inputs,approve_tts:true})});
+      if(inputs.manifest_id!==manifest?.manifest_id||JSON.stringify(inputs.guide)!==JSON.stringify(JSON.parse(document.querySelector("#guide").value))||inputs.capcut_root!==(document.querySelector("#capcut-root").value||null)) throw new Error("준비 중 입력이 변경됐습니다. 다시 준비하세요.");
+      preparedExport=plan;preparedInputs=inputs;show(preparedExport)
+    }catch(e){result.textContent=e.message}finally{preparingExport=false;document.querySelector("#prepare-export").disabled=false}};
+    for(const id of ["#guide","#capcut-root"]) document.querySelector(id).addEventListener("input",()=>{preparedExport=null;preparedInputs=null});
+    document.querySelector("#commit-export").onclick=async()=>{if(preparingExport||committingExport) return;try{
       if(!preparedExport) throw new Error("먼저 내보내기 준비를 실행하세요.");
-      if(!confirm("검증된 에셋으로 새 CapCut 프로젝트를 생성할까요?")) return;
+      if(!preparedInputs||preparedInputs.manifest_id!==manifest?.manifest_id) throw new Error("명세가 변경됐습니다. 준비를 다시 실행하세요.");
+      if(!confirm("확정한 본문·에셋으로 새 CapCut 프로젝트를 생성할까요? TTS 사용 시 제목 음성은 유료 생성될 수 있습니다.")) return;
+      committingExport=true;document.querySelector("#commit-export").disabled=true;
       show(await api("/api/personal/exports/commit",{method:"POST",body:JSON.stringify({plan_path:preparedExport.plan_path})}))
-    }catch(e){result.textContent=e.message}};
+    }catch(e){result.textContent=e.message}finally{committingExport=false;document.querySelector("#commit-export").disabled=false}};
     async function loadSavedGuideHandoff(){
       const params=new URLSearchParams(window.location.search);
       const channel=params.get("channel"), name=params.get("name"), manifestId=params.get("manifest_id");
@@ -544,12 +717,16 @@
         return;
       }
       const sourceStatus=document.querySelector("#source-status");
-      sourceStatus.textContent=`저장된 가이드 불러오는 중: ${channel} / ${name}`;
+      sourceStatus.textContent=`TTS 생성·대사 구간 길이 계산 중: ${channel} / ${name}`;
       try{
         const imported=await api("/api/personal/manifests/from-guide",{method:"POST",body:JSON.stringify({channel,name})});
         manifest=imported.manifest;
         document.querySelector("#guide").value=JSON.stringify(imported.guide,null,2);
-        sourceStatus.textContent=`저장된 가이드 연결됨: ${channel} / ${name}${imported.defaults_refreshed?" · 추천 기본값 갱신":imported.reused?" · 기존 작업 재개":" · 새 작업"}`;
+        const timing=imported.tts_timing||{};
+        const timingLabel=timing.status==="measured"
+          ?` · TTS 실측 ${timing.segments}구간 / ${Number(timing.total_duration_sec||0).toFixed(2)}초${timing.reused?` · 음성 ${timing.reused}개 재사용`:""}`
+          :" · TTS 키 없음: 예상 길이 사용";
+        sourceStatus.textContent=`저장된 가이드 연결됨: ${channel} / ${name}${imported.defaults_refreshed?" · 추천 기본값 갱신":imported.reused?" · 기존 작업 재개":" · 새 작업"}${timingLabel}`;
         const next=new URL(window.location.href);
         next.searchParams.set("manifest_id",manifest.manifest_id);
         window.history.replaceState({}, "", next);

@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     HTTPException = Exception
 
 from shortly.config import Settings
-from shortly.llm.base import LLMClient
+from shortly.llm.base import LLMClient, LLMQuotaExceeded
 
 
 EXPECTED_ROUTES = {
@@ -102,6 +102,21 @@ class WebContractTests(unittest.TestCase):
             self.assertTrue(web_app._is_lan_ip(address))
         self.assertFalse(web_app._is_lan_ip("8.8.8.8"))
         self.assertFalse(web_app._is_lan_ip("not-an-ip"))
+
+    def test_background_job_exposes_commercial_ai_quota_error_code(self) -> None:
+        job = web_app.Job(id="fixture", kind="guide")
+
+        def fail(_progress):
+            raise LLMQuotaExceeded("anthropic")
+
+        web_app._run_job(job, fail)
+
+        self.assertEqual(job.status, "error")
+        self.assertEqual(job.error_code, "commercial_ai_quota_exceeded")
+        self.assertIn("토큰·크레딧", job.error)
+        event = job.queue.get_nowait()
+        self.assertEqual(event["type"], "error")
+        self.assertEqual(event["error_code"], job.error_code)
 
 
 if __name__ == "__main__":

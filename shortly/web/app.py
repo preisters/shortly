@@ -75,6 +75,7 @@ class Job:
     logs: List[str] = field(default_factory=list)
     result: Optional[dict] = None
     error: Optional[str] = None
+    error_code: Optional[str] = None
     queue: "queue.Queue" = field(default_factory=queue.Queue)
 
 
@@ -100,7 +101,12 @@ def _run_job(job: Job, fn) -> None:
     except Exception as exc:  # noqa: BLE001
         job.status = "error"
         job.error = str(exc)
-        job.queue.put({"type": "error", "message": str(exc)})
+        job.error_code = str(getattr(exc, "error_code", "") or "") or None
+        job.queue.put({
+            "type": "error",
+            "message": str(exc),
+            "error_code": job.error_code,
+        })
 
 
 def _safe(obj):
@@ -157,6 +163,8 @@ class GuideRequest(BaseModel):
     channel: str
     text: str
     is_script: bool = False
+    research_focus: str = ""
+    required_content: str = ""
 
 
 class GuideRevisionRequest(BaseModel):
@@ -364,7 +372,9 @@ def api_guide(req: GuideRequest) -> dict:
     settings = get_settings()
     generate_guide = service.generate_guide
     job_id = _start_job("guide", lambda prog: generate_guide(
-        req.channel, req.text, is_script=req.is_script, settings=settings, progress=prog))
+        req.channel, req.text, is_script=req.is_script, settings=settings, progress=prog,
+        research_focus=req.research_focus,
+        required_content=req.required_content))
     return {"job_id": job_id}
 
 
@@ -383,7 +393,8 @@ def api_job(job_id: str) -> dict:
     if job is None:
         raise HTTPException(404, "job 없음")
     return {"id": job.id, "kind": job.kind, "status": job.status,
-            "logs": job.logs, "result": _safe(job.result), "error": job.error}
+            "logs": job.logs, "result": _safe(job.result), "error": job.error,
+            "error_code": job.error_code}
 
 
 @app.get("/api/jobs/{job_id}/stream")

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ....core.domain.assets import CutManifest
+from ....generate.editorial import WHOLE_VIDEO_REVIEW_GUIDANCE
 from ....llm.base import (
     LLMClient,
     LLMError,
@@ -109,6 +110,8 @@ def qwen_read_only_review(
     system = (
         "You review a YouTube Shorts cut plan. Return feedback only. "
         "Never propose or claim that you changed files, the manifest, or a project. "
+        "This is a text-only plan review: you have not inspected image pixels. "
+        "Never certify a generated product's visual accuracy from its prompt alone. "
         "Be concise, return at most 6 findings, and keep each message under 120 characters."
     )
     user = (
@@ -116,6 +119,17 @@ def qwen_read_only_review(
         '형식: {"passed": bool, "summary": str, "findings": '
         '[{"severity":"info|warning|error","code":str,'
         '"message":str,"cut_id":str|null}]}\n'
+        "각 컷을 앞뒤 대사와 함께 검수한다. 실존 제품의 시대·버전·실루엣·뚜껑·라벨이 "
+        "요구되는 컷은 원본/참조 확보 계획을 확인하고, 외형 설명에 무지 용기나 임의 상품을 "
+        "대신 쓰면 product_fidelity 경고를 낸다. 지시어와 수식어가 화면에 구현되는지도 확인한다 "
+        "(컬러 케첩으로 그렸다는 대사에 평범한 핫도그만 있으면 context_mismatch). "
+        "다음 절의 색상·제품·결과를 앞 컷에 공개하면 premature_reveal 경고를 낸다. "
+        "실제 생성 이미지의 실물 대조는 별도 시각 검수가 필요하며 이 텍스트 검수로 대체하지 않는다.\n"
+        f"{WHOLE_VIDEO_REVIEW_GUIDANCE}\n"
+        "전체 순서에서 광고 인상은 advertorial_impression, 도입 뒤 시청 이유 부족은 "
+        "missing_post_hook_reason, 제목과 중간 관심사의 이탈은 story_detour로 구체적 구간과 함께 보고한다. "
+        "주요 전개 문제를 기술 검사 통과로 덮지 않는다. 단어가 등장했다는 이유만으로 자동 불합격시키지 말고 "
+        "제공된 대사·화면 계획에서 실제 문제를 특정한다. 전체 흐름 문제에는 cut_id=null을 쓸 수 있다.\n"
         f"manifest={json.dumps(snapshot, ensure_ascii=False)}\n"
         f"technical={json.dumps((technical or technical_review(manifest)).to_dict(), ensure_ascii=False)}"
     )
@@ -151,6 +165,7 @@ def qwen_read_only_review(
             reviewer=f"local-qwen:{llm.text_model}",
         )
     except (LLMUnavailable, LLMError) as exc:
+        auto_start = bool(getattr(llm, "_auto_start", False))
         return ReviewReport(
             passed=False,
             findings=[
@@ -158,9 +173,15 @@ def qwen_read_only_review(
                     "warning",
                     "local_model_request_failed",
                     (
-                        "로컬 모델 호출에 실패했습니다. LM Studio 서버가 "
-                        "설정된 주소에서 실행 중인지, 검수 모델이 로드됐는지 확인하세요. "
-                        f"오류 유형: {type(exc).__name__}"
+                        (
+                            "LM Studio 자동 시작 또는 검수 모델 자동 로드에 실패했습니다. "
+                            "LM Studio CLI와 로컬 모델 설치 상태를 확인하세요. "
+                            if auto_start
+                            else
+                            "로컬 모델 호출에 실패했습니다. LM Studio 서버가 "
+                            "설정된 주소에서 실행 중인지, 검수 모델이 로드됐는지 확인하세요. "
+                        )
+                        + f"오류 유형: {type(exc).__name__}"
                     ),
                 )
             ],
